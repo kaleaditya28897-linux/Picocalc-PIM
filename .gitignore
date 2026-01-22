@@ -1,0 +1,21 @@
+# Data files (user-specific)
+data/
+
+# MicroPython compiled files
+*.mpy
+__pycache__/
+
+# Editor files
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Backup files
+*.bak
+*.backup
