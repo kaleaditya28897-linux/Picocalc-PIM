@@ -1,22 +1,29 @@
 """
 Keyboard input handler for Picocalc
-Handles 67-key keyboard via I2C interface with STM32 co-processor
+Uses existing keyboard modules and sys.stdin
 """
 
-import machine
+import sys
+import select
 import time
 
-# Key codes for Picocalc keyboard
-# These are common key definitions - adjust based on actual hardware
-KEY_UP = 0x01
-KEY_DOWN = 0x02
-KEY_LEFT = 0x03
-KEY_RIGHT = 0x04
-KEY_ENTER = 0x0D
-KEY_ESC = 0x1B
-KEY_BACKSPACE = 0x08
-KEY_TAB = 0x09
-KEY_SPACE = 0x20
+# Try to import Picocalc keyboard module
+try:
+    import pico_keyboard
+    HAS_PICO_KEYBOARD = True
+except ImportError:
+    HAS_PICO_KEYBOARD = False
+
+# Key codes
+KEY_UP = ord('A')  # Arrow up often sends 'A' in some terminals
+KEY_DOWN = ord('B')
+KEY_LEFT = ord('D')
+KEY_RIGHT = ord('C')
+KEY_ENTER = ord('\r')
+KEY_ESC = 27
+KEY_BACKSPACE = ord('\b')
+KEY_TAB = ord('\t')
+KEY_SPACE = ord(' ')
 
 # Number keys
 KEY_0 = ord('0')
@@ -32,6 +39,8 @@ KEY_9 = ord('9')
 
 # Letter keys
 KEY_A = ord('a')
+KEY_E = ord('e')
+KEY_D = ord('d')
 KEY_Z = ord('z')
 
 
@@ -40,61 +49,77 @@ class Keyboard:
 
     def __init__(self):
         """Initialize keyboard handler"""
-        self._init_hardware()
         self.last_key = None
         self.key_buffer = []
+        self.use_pico_keyboard = False
 
-    def _init_hardware(self):
-        """Initialize I2C connection to keyboard controller"""
-        try:
-            # I2C setup for keyboard (STM32 co-processor)
-            # Note: Adjust pins and address according to Picocalc schematic
-            self.i2c = machine.I2C(
-                0,
-                scl=machine.Pin(5),
-                sda=machine.Pin(4),
-                freq=400000
-            )
-
-            # Keyboard controller I2C address (typical: 0x55 or similar)
-            self.kbd_addr = 0x55
-
-            # Try to communicate with keyboard
+        # Try to use pico_keyboard module
+        if HAS_PICO_KEYBOARD:
             try:
-                self.i2c.scan()
-                self.hardware_available = True
+                pico_keyboard.init()
+                self.use_pico_keyboard = True
+                print("Using pico_keyboard module")
             except:
-                self.hardware_available = False
-                print("Keyboard hardware not detected - using simulation mode")
+                print("pico_keyboard available but init failed")
 
-        except Exception as e:
-            print(f"Keyboard init warning: {e}")
-            self.i2c = None
-            self.hardware_available = False
+        # Check if stdin is available for input
+        try:
+            # Test if stdin has data available
+            self.has_stdin = hasattr(sys.stdin, 'read')
+        except:
+            self.has_stdin = False
+
+        if not self.use_pico_keyboard and not self.has_stdin:
+            print("Keyboard: Using simulation mode")
 
     def read_key(self):
         """Read a key press (non-blocking)"""
-        if self.hardware_available and self.i2c:
+        # Try pico_keyboard module first
+        if self.use_pico_keyboard and HAS_PICO_KEYBOARD:
             try:
-                # Read key code from I2C
-                data = self.i2c.readfrom(self.kbd_addr, 1)
-                if data and data[0] != 0:
-                    key = data[0]
-                    if key != self.last_key:
-                        self.last_key = key
-                        return key
-                else:
-                    self.last_key = None
+                if hasattr(pico_keyboard, 'get_key'):
+                    key = pico_keyboard.get_key()
+                    if key:
+                        return ord(key) if isinstance(key, str) else key
+                elif hasattr(pico_keyboard, 'read'):
+                    key = pico_keyboard.read()
+                    if key:
+                        return ord(key) if isinstance(key, str) else key
             except:
                 pass
 
-        # Simulation mode for testing without hardware
-        # In real hardware, this would not be needed
+        # Try stdin
+        if self.has_stdin:
+            try:
+                # Check if data is available (non-blocking)
+                if hasattr(select, 'poll'):
+                    poll = select.poll()
+                    poll.register(sys.stdin, select.POLLIN)
+                    events = poll.poll(0)  # 0 = non-blocking
+                    if events:
+                        char = sys.stdin.read(1)
+                        if char:
+                            return ord(char)
+                else:
+                    # Fallback: try to read without select
+                    # This might block briefly
+                    import sys
+                    if hasattr(sys.stdin, 'read'):
+                        try:
+                            char = sys.stdin.read(1)
+                            if char:
+                                return ord(char)
+                        except:
+                            pass
+            except:
+                pass
+
         return None
 
     def wait_key(self, timeout=None):
-        """Wait for a key press (blocking)"""
+        """Wait for a key press (blocking with optional timeout)"""
         start = time.ticks_ms()
+
         while True:
             key = self.read_key()
             if key:
@@ -122,21 +147,21 @@ class Keyboard:
 
     def input_text(self, prompt="", max_length=50):
         """Get text input from user"""
-        text = ""
         print(prompt, end='')
+        text = ""
 
         while True:
-            key = self.wait_key()
+            key = self.wait_key(timeout=100)
             if not key:
                 continue
 
-            if key == KEY_ENTER:
+            if key == KEY_ENTER or key == ord('\n'):
                 print()
                 return text
             elif key == KEY_ESC:
                 print(" [Cancelled]")
                 return None
-            elif key == KEY_BACKSPACE:
+            elif key == KEY_BACKSPACE or key == ord('\b') or key == 127:
                 if text:
                     text = text[:-1]
                     print('\b \b', end='')
@@ -176,32 +201,7 @@ class Keyboard:
         self.key_buffer.clear()
         self.last_key = None
         # Read any pending keys
-        while self.read_key():
+        for _ in range(10):
+            if not self.read_key():
+                break
             time.sleep_ms(10)
-
-
-class SimulatedKeyboard(Keyboard):
-    """Simulated keyboard for testing without hardware"""
-
-    def __init__(self):
-        """Initialize simulated keyboard"""
-        self.last_key = None
-        self.key_buffer = []
-        self.hardware_available = False
-        self.simulation_keys = []
-
-    def simulate_key(self, key_code):
-        """Simulate a key press"""
-        self.simulation_keys.append(key_code)
-
-    def simulate_text(self, text):
-        """Simulate text input"""
-        for char in text:
-            self.simulation_keys.append(ord(char))
-        self.simulation_keys.append(KEY_ENTER)
-
-    def read_key(self):
-        """Read simulated key"""
-        if self.simulation_keys:
-            return self.simulation_keys.pop(0)
-        return None

@@ -2,6 +2,16 @@
 
 A comprehensive Personal Information Manager (PIM) for the ClockworkPi Picocalc running MicroPython v1.27.0 on the RP2350 (Raspberry Pi Pico2W).
 
+**✨ Uses existing Picocalc display and keyboard modules for maximum compatibility!**
+
+## Key Features
+
+This PIM is designed to work with **existing Picocalc MicroPython modules**:
+- 🖥️ **Display**: Automatically detects and uses `picocalcdisplay` or `picocalc` modules
+- ⌨️ **Keyboard**: Uses `pico_keyboard` module or falls back to `sys.stdin`
+- 📦 **Zero custom hardware drivers** - leverages pre-installed Picocalc modules
+- 🔌 **Plug and play** - works with standard Picocalc MicroPython firmware
+
 ## Features
 
 ### Personal Information Management
@@ -174,36 +184,35 @@ Data is saved to `data/journal.json`
 
 ## Hardware Configuration
 
-### Display Pins (SPI)
-```python
-SPI0:
-- SCK:  Pin 18
-- MOSI: Pin 19
-- MISO: Pin 16
-- CS:   Pin 17
-- DC:   Pin 20
-- RST:  Pin 21
+✅ **No hardware configuration needed!**
+
+The PIM automatically uses existing Picocalc modules that handle all hardware interfacing:
+
+- **Display**: Managed by `picocalcdisplay` or `picocalc` modules (pre-installed)
+- **Keyboard**: Managed by `pico_keyboard` module (pre-installed)
+- **No pin configuration required** - everything is handled by existing drivers
+
+### What Gets Detected on Startup
+
+When you run the PIM, it will print:
+```
+Using picocalcdisplay module
+Using pico_keyboard module
 ```
 
-### Keyboard (I2C)
-```python
-I2C0:
-- SCL: Pin 5
-- SDA: Pin 4
-- Address: 0x55
+Or if modules aren't found:
 ```
-
-**Note**: Adjust pin configurations in `lib/display.py` and `lib/keyboard.py` if your hardware differs.
+Display: Using framebuffer mode (no hardware)
+Keyboard: Using simulation mode
+```
 
 ## Customization
 
 ### Adjusting Display Settings
 
 Edit `lib/display.py` to modify:
-- Display resolution
-- Color scheme
-- SPI speed
-- Pin assignments
+- Color scheme (RGB565 colors)
+- Display resolution constants
 
 ### Modifying Game Settings
 
@@ -243,27 +252,53 @@ All user data is stored in JSON format in the `data/` directory:
 
 You can backup these files to preserve your data.
 
+## Module Compatibility
+
+This PIM automatically detects and uses existing Picocalc modules:
+
+### Display Modules (auto-detected)
+The display wrapper tries these modules in order:
+1. **`picocalcdisplay`** - C module for LCD display
+2. **`picocalc`** - Python module with display functions
+3. **Framebuffer** - Falls back to simulation mode
+
+### Keyboard Modules (auto-detected)
+The keyboard handler tries these methods in order:
+1. **`pico_keyboard`** - Dedicated keyboard module
+2. **`sys.stdin`** - Standard input (works with terminal/REPL)
+3. **Simulation mode** - For testing without hardware
+
+### Required Modules (built-in)
+- `framebuf` - Frame buffer for graphics (standard MicroPython)
+- `sys` - System functions
+- `json` - Data persistence
+- `time` - Timing functions
+- `select` - Non-blocking I/O (if available)
+
 ## Troubleshooting
 
 ### Display Not Working
-- Check SPI pin connections
-- Verify display controller initialization
-- Test with a simple framebuffer demo
+✅ **No custom hardware setup needed!**
+- Ensure `picocalcdisplay` or `picocalc` module is installed
+- The app will print which module it's using on startup
+- If using framebuffer mode, display operations still work but won't show on screen
 
 ### Keyboard Not Responding
-- Check I2C connections
-- Verify keyboard controller address
-- Try scanning for I2C devices
+✅ **No custom I2C setup needed!**
+- Ensure `pico_keyboard` module is installed (usually comes with Picocalc firmware)
+- Try using keyboard input via the REPL/terminal
+- Check startup messages to see which input method is active
+- The app will print which keyboard method it's using
 
 ### File System Errors
-- Ensure `data/` directory exists
-- Check available flash storage
+- Ensure `data/` directory exists (auto-created on first run)
+- Check available flash storage: `import os; os.statvfs('/')`
 - Verify file permissions
 
 ### Out of Memory
-- Reduce buffer sizes
+- Reduce buffer sizes if needed
 - Simplify graphics
-- Clear unused data files
+- Clear old data files periodically
 
 ## Performance Tips
 
