@@ -1,21 +1,31 @@
 """
-Display driver wrapper for Picocalc
-Supports ST7365P display controller (320x320)
+Display wrapper for Picocalc
+Uses existing Picocalc display modules when available
 """
 
-import machine
 import framebuf
-import time
+
+# Try to import existing Picocalc display modules
+try:
+    import picocalcdisplay
+    HAS_PICOCALC_DISPLAY = True
+except ImportError:
+    HAS_PICOCALC_DISPLAY = False
+    try:
+        import picocalc
+        HAS_PICOCALC = True
+    except ImportError:
+        HAS_PICOCALC = False
 
 
 class Display:
-    """Display driver for Picocalc 320x320 IPS display"""
+    """Display wrapper using available Picocalc modules"""
 
     # Display dimensions
     WIDTH = 320
     HEIGHT = 320
 
-    # Colors (RGB565 format)
+    # RGB565 colors
     BLACK = 0x0000
     WHITE = 0xFFFF
     RED = 0xF800
@@ -27,8 +37,8 @@ class Display:
     GRAY = 0x8410
 
     def __init__(self):
-        """Initialize the display"""
-        self._init_hardware()
+        """Initialize display using available modules"""
+        # Create framebuffer
         self.buffer = bytearray(self.WIDTH * self.HEIGHT * 2)  # RGB565
         self.fb = framebuf.FrameBuffer(
             self.buffer,
@@ -36,88 +46,30 @@ class Display:
             self.HEIGHT,
             framebuf.RGB565
         )
+
+        # Detect and initialize hardware
+        self.use_hardware = False
+
+        if HAS_PICOCALC_DISPLAY:
+            try:
+                picocalcdisplay.init()
+                self.use_hardware = True
+                print("Using picocalcdisplay module")
+            except Exception as e:
+                print(f"picocalcdisplay init failed: {e}")
+
+        elif HAS_PICOCALC:
+            try:
+                # Some picocalc modules auto-initialize
+                self.use_hardware = True
+                print("Using picocalc module")
+            except Exception as e:
+                print(f"picocalc init failed: {e}")
+
+        if not self.use_hardware:
+            print("Display: Using framebuffer mode (no hardware)")
+
         self.clear()
-
-    def _init_hardware(self):
-        """Initialize SPI and display hardware"""
-        try:
-            # SPI setup for display
-            # Note: Adjust pins according to Picocalc schematic
-            self.spi = machine.SPI(
-                0,
-                baudrate=40000000,
-                polarity=0,
-                phase=0,
-                sck=machine.Pin(18),
-                mosi=machine.Pin(19),
-                miso=machine.Pin(16)
-            )
-
-            # Control pins
-            self.dc = machine.Pin(20, machine.Pin.OUT)  # Data/Command
-            self.cs = machine.Pin(17, machine.Pin.OUT)  # Chip Select
-            self.rst = machine.Pin(21, machine.Pin.OUT)  # Reset
-
-            # Reset display
-            self._reset()
-            self._init_display()
-
-        except Exception as e:
-            print(f"Display init warning: {e}")
-            # Fallback to simulation mode for testing
-            self.spi = None
-
-    def _reset(self):
-        """Hardware reset display"""
-        if self.rst:
-            self.rst.value(1)
-            time.sleep_ms(5)
-            self.rst.value(0)
-            time.sleep_ms(20)
-            self.rst.value(1)
-            time.sleep_ms(150)
-
-    def _write_cmd(self, cmd):
-        """Write command to display"""
-        if self.spi:
-            self.dc.value(0)  # Command mode
-            self.cs.value(0)
-            self.spi.write(bytearray([cmd]))
-            self.cs.value(1)
-
-    def _write_data(self, data):
-        """Write data to display"""
-        if self.spi:
-            self.dc.value(1)  # Data mode
-            self.cs.value(0)
-            if isinstance(data, int):
-                self.spi.write(bytearray([data]))
-            else:
-                self.spi.write(data)
-            self.cs.value(1)
-
-    def _init_display(self):
-        """Initialize display controller"""
-        # Basic initialization sequence for ST7365P/ST7789-compatible displays
-        commands = [
-            (0x01, None, 150),      # Software reset
-            (0x11, None, 500),      # Sleep out
-            (0x3A, [0x55], 10),     # Interface pixel format (RGB565)
-            (0x36, [0x00], 0),      # Memory data access control
-            (0x29, None, 100),      # Display on
-        ]
-
-        for cmd_data in commands:
-            cmd = cmd_data[0]
-            data = cmd_data[1]
-            delay = cmd_data[2] if len(cmd_data) > 2 else 0
-
-            self._write_cmd(cmd)
-            if data:
-                for byte in data:
-                    self._write_data(byte)
-            if delay:
-                time.sleep_ms(delay)
 
     def clear(self, color=BLACK):
         """Clear display with color"""
@@ -166,22 +118,21 @@ class Display:
 
     def show(self):
         """Update display with buffer contents"""
-        if self.spi:
-            # Set address window to full screen
-            self._write_cmd(0x2A)  # Column address set
-            self._write_data(0x00)
-            self._write_data(0x00)
-            self._write_data((self.WIDTH - 1) >> 8)
-            self._write_data((self.WIDTH - 1) & 0xFF)
+        if not self.use_hardware:
+            return  # Simulation mode
 
-            self._write_cmd(0x2B)  # Row address set
-            self._write_data(0x00)
-            self._write_data(0x00)
-            self._write_data((self.HEIGHT - 1) >> 8)
-            self._write_data((self.HEIGHT - 1) & 0xFF)
-
-            self._write_cmd(0x2C)  # Memory write
-            self._write_data(self.buffer)
+        try:
+            if HAS_PICOCALC_DISPLAY:
+                # Use picocalcdisplay C module
+                picocalcdisplay.show(self.buffer)
+            elif HAS_PICOCALC:
+                # Try picocalc module methods
+                if hasattr(picocalc, 'display_buffer'):
+                    picocalc.display_buffer(self.buffer)
+                elif hasattr(picocalc, 'show'):
+                    picocalc.show(self.buffer)
+        except Exception as e:
+            print(f"Display show error: {e}")
 
     def blit(self, fbuf, x, y, key=-1):
         """Blit framebuffer to display"""
