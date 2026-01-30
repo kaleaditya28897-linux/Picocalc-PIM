@@ -5,7 +5,7 @@ Create, view, edit, and organize notes
 
 import time
 import json
-from lib.ui import Menu, InputDialog, MessageBox, ConfirmDialog, ListView
+from lib.ui import Menu, InputDialog, MessageBox, ConfirmDialog, ListView, TextAreaDialog
 
 
 class Note:
@@ -96,11 +96,11 @@ class NotesApp:
         if not title:
             return
 
-        # Get content (simplified for now - in real app might want multiline editor)
-        dlg = InputDialog(self.display, self.keyboard,
-                         title="New Note",
-                         prompt="Content:",
-                         max_length=200)
+        # Get content with multi-line text area
+        dlg = TextAreaDialog(self.display, self.keyboard,
+                            title="New Note",
+                            prompt="Content:",
+                            max_length=500)
         content = dlg.show()
         if content is None:
             return
@@ -198,12 +198,12 @@ class NotesApp:
         if title is None:
             return
 
-        # Edit content
-        dlg = InputDialog(self.display, self.keyboard,
-                         title="Edit Note",
-                         prompt="Content:",
-                         default=note.content,
-                         max_length=200)
+        # Edit content with multi-line text area
+        dlg = TextAreaDialog(self.display, self.keyboard,
+                            title="Edit Note",
+                            prompt="Content:",
+                            default=note.content,
+                            max_length=500)
         content = dlg.show()
         if content is None:
             return

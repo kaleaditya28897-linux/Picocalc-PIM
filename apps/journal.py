@@ -5,7 +5,7 @@ Daily journal entries with mood tracking
 
 import time
 import json
-from lib.ui import Menu, InputDialog, MessageBox, ConfirmDialog, ListView
+from lib.ui import Menu, InputDialog, MessageBox, ConfirmDialog, ListView, TextAreaDialog
 
 
 class JournalEntry:
@@ -115,11 +115,11 @@ class JournalApp:
         if mood is None:
             return
 
-        # Get content
-        dlg = InputDialog(self.display, self.keyboard,
-                         title="New Journal Entry",
-                         prompt="What's on your mind?",
-                         max_length=250)
+        # Get content with multi-line text area
+        dlg = TextAreaDialog(self.display, self.keyboard,
+                            title="New Journal Entry",
+                            prompt="What's on your mind?",
+                            max_length=500)
         content = dlg.show()
         if not content:
             return
@@ -261,12 +261,12 @@ class JournalApp:
         if mood is None:
             return
 
-        # Edit content
-        dlg = InputDialog(self.display, self.keyboard,
-                         title="Edit Entry",
-                         prompt="Content:",
-                         default=entry.content,
-                         max_length=250)
+        # Edit content with multi-line text area
+        dlg = TextAreaDialog(self.display, self.keyboard,
+                            title="Edit Entry",
+                            prompt="Content:",
+                            default=entry.content,
+                            max_length=500)
         content = dlg.show()
         if content is None:
             return

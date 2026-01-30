@@ -1,27 +1,19 @@
 """
 Keyboard input handler for Picocalc
-Uses existing keyboard modules and sys.stdin
+Uses sys.stdin.read(1) for key input
 """
 
 import sys
-import select
 import time
 
-# Try to import Picocalc keyboard module
-try:
-    import pico_keyboard
-    HAS_PICO_KEYBOARD = True
-except ImportError:
-    HAS_PICO_KEYBOARD = False
-
 # Key codes
-KEY_UP = ord('A')  # Arrow up often sends 'A' in some terminals
-KEY_DOWN = ord('B')
-KEY_LEFT = ord('D')
-KEY_RIGHT = ord('C')
-KEY_ENTER = ord('\r')
+KEY_UP = 256
+KEY_DOWN = 257
+KEY_LEFT = 258
+KEY_RIGHT = 259
+KEY_ENTER = ord('\n')
 KEY_ESC = 27
-KEY_BACKSPACE = ord('\b')
+KEY_BACKSPACE = 127
 KEY_TAB = ord('\t')
 KEY_SPACE = ord(' ')
 
@@ -49,93 +41,36 @@ class Keyboard:
 
     def __init__(self):
         """Initialize keyboard handler"""
-        self.last_key = None
-        self.key_buffer = []
-        self.use_pico_keyboard = False
-
-        # Try to use pico_keyboard module
-        if HAS_PICO_KEYBOARD:
-            try:
-                pico_keyboard.init()
-                self.use_pico_keyboard = True
-                print("Using pico_keyboard module")
-            except:
-                print("pico_keyboard available but init failed")
-
-        # Check if stdin is available for input
-        try:
-            # Test if stdin has data available
-            self.has_stdin = hasattr(sys.stdin, 'read')
-        except:
-            self.has_stdin = False
-
-        if not self.use_pico_keyboard and not self.has_stdin:
-            print("Keyboard: Using simulation mode")
-
-    def read_key(self):
-        """Read a key press (non-blocking)"""
-        # Try pico_keyboard module first
-        if self.use_pico_keyboard and HAS_PICO_KEYBOARD:
-            try:
-                if hasattr(pico_keyboard, 'get_key'):
-                    key = pico_keyboard.get_key()
-                    if key:
-                        return ord(key) if isinstance(key, str) else key
-                elif hasattr(pico_keyboard, 'read'):
-                    key = pico_keyboard.read()
-                    if key:
-                        return ord(key) if isinstance(key, str) else key
-            except:
-                pass
-
-        # Try stdin
-        if self.has_stdin:
-            try:
-                # Check if data is available (non-blocking)
-                if hasattr(select, 'poll'):
-                    poll = select.poll()
-                    poll.register(sys.stdin, select.POLLIN)
-                    events = poll.poll(0)  # 0 = non-blocking
-                    if events:
-                        char = sys.stdin.read(1)
-                        if char:
-                            return ord(char)
-                else:
-                    # Fallback: try to read without select
-                    # This might block briefly
-                    import sys
-                    if hasattr(sys.stdin, 'read'):
-                        try:
-                            char = sys.stdin.read(1)
-                            if char:
-                                return ord(char)
-                        except:
-                            pass
-            except:
-                pass
-
-        return None
+        pass
 
     def wait_key(self, timeout=None):
-        """Wait for a key press (blocking with optional timeout)"""
-        start = time.ticks_ms()
-
-        while True:
-            key = self.read_key()
-            if key:
-                return key
-
-            if timeout and time.ticks_diff(time.ticks_ms(), start) > timeout:
-                return None
-
-            time.sleep_ms(10)
+        """Wait for a key press (blocking)"""
+        c = sys.stdin.read(1)
+        if not c:
+            return None
+        if c == '\x1b':
+            c2 = sys.stdin.read(1)
+            if c2 == '[':
+                c3 = sys.stdin.read(1)
+                if c3 == 'A':
+                    return KEY_UP
+                elif c3 == 'B':
+                    return KEY_DOWN
+                elif c3 == 'C':
+                    return KEY_RIGHT
+                elif c3 == 'D':
+                    return KEY_LEFT
+                else:
+                    return ord(c3)
+            else:
+                return KEY_ESC
+        return ord(c)
 
     def get_char(self):
         """Get character input (blocking)"""
         key = self.wait_key()
         if key:
-            # Convert key code to character
-            if 32 <= key <= 126:  # Printable ASCII
+            if 32 <= key <= 126:
                 return chr(key)
             elif key == KEY_ENTER:
                 return '\n'
@@ -151,7 +86,7 @@ class Keyboard:
         text = ""
 
         while True:
-            key = self.wait_key(timeout=100)
+            key = self.wait_key()
             if not key:
                 continue
 
@@ -161,7 +96,7 @@ class Keyboard:
             elif key == KEY_ESC:
                 print(" [Cancelled]")
                 return None
-            elif key == KEY_BACKSPACE or key == ord('\b') or key == 127:
+            elif key == KEY_BACKSPACE or key == 127:
                 if text:
                     text = text[:-1]
                     print('\b \b', end='')
@@ -169,8 +104,6 @@ class Keyboard:
                 char = chr(key)
                 text += char
                 print(char, end='')
-
-            time.sleep_ms(10)
 
     def input_number(self, prompt="", min_val=None, max_val=None):
         """Get numeric input from user"""
@@ -193,15 +126,9 @@ class Keyboard:
 
     def is_key_pressed(self, key_code):
         """Check if specific key is currently pressed"""
-        current = self.read_key()
+        current = self.wait_key()
         return current == key_code
 
     def flush(self):
         """Clear key buffer"""
-        self.key_buffer.clear()
-        self.last_key = None
-        # Read any pending keys
-        for _ in range(10):
-            if not self.read_key():
-                break
-            time.sleep_ms(10)
+        pass
