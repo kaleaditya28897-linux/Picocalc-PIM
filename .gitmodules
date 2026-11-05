@@ -1,0 +1,9 @@
+[submodule "third_party/pico-sdk"]
+	path = third_party/pico-sdk
+	url = https://github.com/raspberrypi/pico-sdk.git
+[submodule "third_party/PicoCalc"]
+	path = third_party/PicoCalc
+	url = https://github.com/clockworkpi/PicoCalc.git
+[submodule "third_party/pico-vfs"]
+	path = third_party/pico-vfs
+	url = https://github.com/oyama/pico-vfs.git

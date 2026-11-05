@@ -1,9 +1,9 @@
-# Data files (user-specific)
-data/
-
-# MicroPython compiled files
-*.mpy
-__pycache__/
+# Build outputs
+build/
+*.elf
+*.map
+*.uf2
+*.bin
 
 # Editor files
 .vscode/

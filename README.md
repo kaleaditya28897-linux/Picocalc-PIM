@@ -1,372 +1,47 @@
-# Picocalc PIM - Personal Information Manager
+# PicoCalc PIM
 
-A comprehensive Personal Information Manager (PIM) for the ClockworkPi Picocalc running MicroPython v1.27.0 on the RP2350 (Raspberry Pi Pico2W).
-
-**✨ Uses existing Picocalc display and keyboard modules for maximum compatibility!**
-
-## Key Features
-
-This PIM is designed to work with **existing Picocalc MicroPython modules**:
-- 🖥️ **Display**: Automatically detects and uses `picocalcdisplay` or `picocalc` modules
-- ⌨️ **Keyboard**: Uses `pico_keyboard` module or falls back to `sys.stdin`
-- 📦 **Zero custom hardware drivers** - leverages pre-installed Picocalc modules
-- 🔌 **Plug and play** - works with standard Picocalc MicroPython firmware
+PicoCalc PIM is a C11 firmware PDA for the ClockworkPi PicoCalc with a Raspberry Pi Pico 2 W. It uses the official PicoCalc LVGL display and keyboard drivers, stores its PDA database on a FAT32 SD card, and has an amber-on-black CRT interface.
 
 ## Features
 
-### Personal Information Management
-- **Calendar**: Monthly calendar view with navigation
-- **Appointments**: Create and manage appointments with date/time
-- **To-Do Lists**: Task management with priorities (Low, Normal, High)
-- **Notes**: Create, edit, and search notes
-- **Journal**: Daily journal entries with mood tracking
+- Calendar, appointments, priority to-dos, notes, and one journal entry per day with moods.
+- Three classic games: Tetris, a turn-based dungeon crawler, and Space Invaders.
+- Keyboard-first controls: arrows navigate and control games, `Enter` activates/fires/drops, and `Esc` returns.
+- Data is a CRC-checked snapshot at `/PIM/pim.dat`; a failed or missing SD card does not destroy in-memory data.
 
-### Games
-- **Snake**: Classic snake game with score tracking
-- **Tetris**: Full-featured Tetris with levels and line clearing
+## Build and flash
 
-## Hardware Requirements
+Install the ARM Embedded Toolchain, CMake, Ninja, Git, and `picotool`, then initialize the pinned sources:
 
-- **Device**: ClockworkPi Picocalc
-- **Microcontroller**: Raspberry Pi Pico2W (RP2350)
-- **Display**: 320x320 IPS display (ST7365P controller)
-- **Input**: 67-key keyboard via I2C
-- **Firmware**: MicroPython v1.27.0
-
-## Installation
-
-### 1. Install MicroPython
-
-Ensure your Picocalc is running MicroPython v1.27.0. You can download it from the [MicroPython website](https://micropython.org/download/rp2-pico-w/).
-
-### 2. Upload Files
-
-Upload all files to your Picocalc using your preferred method:
-
-**Using Thonny IDE:**
-1. Connect your Picocalc via USB
-2. Open Thonny IDE
-3. Select "MicroPython (Raspberry Pi Pico)" as the interpreter
-4. Upload all files maintaining the directory structure:
-   ```
-   Picocalc-PIM/
-   ├── main.py
-   ├── lib/
-   │   ├── display.py
-   │   ├── keyboard.py
-   │   └── ui.py
-   ├── apps/
-   │   ├── calendar_app.py
-   │   ├── appointments.py
-   │   ├── todos.py
-   │   ├── notes.py
-   │   └── journal.py
-   └── games/
-       ├── snake.py
-       └── tetris.py
-   ```
-
-**Using rshell:**
 ```bash
-pip install rshell
-rshell -p /dev/ttyUSB0  # Adjust port as needed
-rsync -r . /pyboard/
+git submodule update --init --recursive
+cmake --preset pico2w-release
+cmake --build --preset pico2w-release
 ```
 
-**Using mpremote:**
+The build produces `build/pico2w-release/picocalc_pim.uf2`; a prebuilt, checksummed image is included at `release/picocalc_pim-pico2w.uf2`. Hold BOOTSEL while connecting the Pico 2 W, then run:
+
 ```bash
-pip install mpremote
-mpremote connect /dev/ttyUSB0 fs cp -r . :
+tools/flash-uf2.sh
 ```
 
-### 3. Create Data Directory
+## SD card setup
 
-The application will automatically create a `data/` directory for storing persistent data, but you can create it manually if needed:
+The storage utility creates one FAT32 partition and its `PIM/` directory. It only accepts a removable whole disk, but it **erases the selected device**:
 
-```python
-import os
-os.mkdir('data')
+```bash
+tools/prepare-sd.sh --device /dev/sdX
+tools/prepare-sd.sh --device /dev/sdX --yes
 ```
 
-## Usage
+Insert the card before starting the PicoCalc. If the card is absent or unreadable, the PDA continues without persistence for that session.
 
-### Starting the Application
+## Tests
 
-Run the application by executing `main.py`:
+The application core is hardware-independent C and runs on the build host:
 
-```python
-import main
-main.main()
+```bash
+cmake --preset host-debug
+cmake --build --preset host-debug
+ctest --preset host-debug
 ```
-
-Or set it to run automatically on boot by renaming `main.py` to `boot.py`.
-
-### Navigation
-
-The PIM uses the Picocalc keyboard for navigation:
-
-- **Arrow Keys**: Navigate menus and move in games
-- **ENTER**: Select/Confirm
-- **ESC**: Back/Cancel
-- **Number Keys**: Quick menu selection
-- **Letter Keys**: Text input
-- **Special Keys**: Game-specific controls
-
-### Main Menu
-
-The main menu provides access to all features:
-
-1. Calendar
-2. Appointments
-3. To-Do List
-4. Notes
-5. Journal
-6. Snake Game
-7. Tetris Game
-8. About
-9. Exit
-
-## Features Guide
-
-### Calendar
-- View monthly calendar
-- Navigate months/years with arrow keys
-- Current day is highlighted
-- Press ENTER to return to current month
-
-### Appointments
-- **Add Appointment**: Create appointments with date, time, title, and description
-- **View Appointments**: Browse all appointments chronologically
-- **Delete Appointment**: Remove appointments
-
-Data is saved to `data/appointments.json`
-
-### To-Do List
-- **Add To-Do**: Create tasks with priorities (Low, Normal, High)
-- **View To-Dos**: See all tasks sorted by status and priority
-- **Mark Complete/Incomplete**: Toggle task status
-- **Statistics**: View completion rate and task breakdown
-- **Delete Completed**: Bulk delete completed tasks
-
-Data is saved to `data/todos.json`
-
-### Notes
-- **Add Note**: Create notes with title and content
-- **View Notes**: Browse all notes (sorted by modification date)
-- **Edit Note**: Update note content
-- **Search Notes**: Find notes by keyword
-- **Delete Note**: Remove notes
-
-Data is saved to `data/notes.json`
-
-### Journal
-- **New Entry**: Create daily journal entries with mood tracking
-- **Mood Options**: Great, Good, Okay, Bad, Terrible
-- **View Entries**: Browse past entries
-- **Edit Entry**: Update existing entries
-- **Mood Stats**: View mood statistics and trends
-
-Data is saved to `data/journal.json`
-
-### Snake Game
-- Control the snake with arrow keys
-- Eat food to grow and score points
-- Avoid walls and your own tail
-- Speed increases as you score more points
-- Press ENTER to restart after game over
-
-### Tetris Game
-- **Arrow Keys**: Move pieces left/right/down
-- **UP Arrow**: Rotate piece
-- **Complete lines** to score points
-- Score increases with level
-- Speed increases every 10 lines
-
-## Hardware Configuration
-
-✅ **No hardware configuration needed!**
-
-The PIM automatically uses existing Picocalc modules that handle all hardware interfacing:
-
-- **Display**: Managed by `picocalcdisplay` or `picocalc` modules (pre-installed)
-- **Keyboard**: Managed by `pico_keyboard` module (pre-installed)
-- **No pin configuration required** - everything is handled by existing drivers
-
-### What Gets Detected on Startup
-
-When you run the PIM, it will print:
-```
-Using picocalcdisplay module
-Using pico_keyboard module
-```
-
-Or if modules aren't found:
-```
-Display: Using framebuffer mode (no hardware)
-Keyboard: Using simulation mode
-```
-
-## Customization
-
-### Adjusting Display Settings
-
-Edit `lib/display.py` to modify:
-- Color scheme (RGB565 colors)
-- Display resolution constants
-
-### Modifying Game Settings
-
-Edit game files in `games/` to adjust:
-- **Snake**: Grid size, speed, colors
-- **Tetris**: Block size, drop speed, colors
-
-### Adding New Features
-
-The modular structure makes it easy to add new applications:
-
-1. Create a new file in `apps/` or `games/`
-2. Import in `main.py`
-3. Add to the main menu
-4. Follow the existing app structure
-
-Example:
-```python
-class MyNewApp:
-    def __init__(self, display, keyboard):
-        self.display = display
-        self.keyboard = keyboard
-
-    def run(self):
-        # Your app logic here
-        pass
-```
-
-## Data Persistence
-
-All user data is stored in JSON format in the `data/` directory:
-
-- `appointments.json`: Appointments
-- `todos.json`: To-do items
-- `notes.json`: Notes
-- `journal.json`: Journal entries
-
-You can backup these files to preserve your data.
-
-## Module Compatibility
-
-This PIM automatically detects and uses existing Picocalc modules:
-
-### Display Modules (auto-detected)
-The display wrapper tries these modules in order:
-1. **`picocalcdisplay`** - C module for LCD display
-2. **`picocalc`** - Python module with display functions
-3. **Framebuffer** - Falls back to simulation mode
-
-### Keyboard Modules (auto-detected)
-The keyboard handler tries these methods in order:
-1. **`pico_keyboard`** - Dedicated keyboard module
-2. **`sys.stdin`** - Standard input (works with terminal/REPL)
-3. **Simulation mode** - For testing without hardware
-
-### Required Modules (built-in)
-- `framebuf` - Frame buffer for graphics (standard MicroPython)
-- `sys` - System functions
-- `json` - Data persistence
-- `time` - Timing functions
-- `select` - Non-blocking I/O (if available)
-
-## Troubleshooting
-
-### Display Not Working
-✅ **No custom hardware setup needed!**
-- Ensure `picocalcdisplay` or `picocalc` module is installed
-- The app will print which module it's using on startup
-- If using framebuffer mode, display operations still work but won't show on screen
-
-### Keyboard Not Responding
-✅ **No custom I2C setup needed!**
-- Ensure `pico_keyboard` module is installed (usually comes with Picocalc firmware)
-- Try using keyboard input via the REPL/terminal
-- Check startup messages to see which input method is active
-- The app will print which keyboard method it's using
-
-### File System Errors
-- Ensure `data/` directory exists (auto-created on first run)
-- Check available flash storage: `import os; os.statvfs('/')`
-- Verify file permissions
-
-### Out of Memory
-- Reduce buffer sizes if needed
-- Simplify graphics
-- Clear old data files periodically
-
-## Performance Tips
-
-1. **Reduce display updates**: Only call `display.show()` when needed
-2. **Optimize data files**: Periodically clean old entries
-3. **Use efficient data structures**: Keep lists sorted for faster access
-4. **Minimize allocations**: Reuse objects when possible
-
-## Development
-
-### Testing Without Hardware
-
-The display and keyboard modules include simulation modes for testing without physical hardware:
-
-```python
-from lib.keyboard import SimulatedKeyboard
-
-# Use simulated keyboard for testing
-kbd = SimulatedKeyboard()
-kbd.simulate_text("Hello")
-```
-
-### Debugging
-
-Enable debug output:
-```python
-import sys
-sys.print_exception(e)  # Print full exception trace
-```
-
-## License
-
-This project is provided under the same license as the repository (see LICENSE file).
-
-## Credits
-
-- Built for ClockworkPi Picocalc
-- MicroPython v1.27.0
-- Raspberry Pi Pico2W (RP2350)
-
-## Contributing
-
-Contributions are welcome! Feel free to:
-- Report bugs
-- Suggest features
-- Submit pull requests
-- Share your customizations
-
-## Resources
-
-- [ClockworkPi Picocalc](https://www.clockworkpi.com/picocalc)
-- [MicroPython Documentation](https://docs.micropython.org/)
-- [RP2350 Datasheet](https://datasheets.raspberrypi.com/rp2350/rp2350-datasheet.pdf)
-- [Picocalc GitHub](https://github.com/clockworkpi/PicoCalc)
-
-## Version History
-
-### v1.0.0 (Initial Release)
-- Calendar with monthly view
-- Appointments manager
-- To-do list with priorities
-- Notes with search
-- Journal with mood tracking
-- Snake game
-- Tetris game
-- Data persistence
-- Full keyboard navigation
-
----
-
-Made with ♥ for the Picocalc community
