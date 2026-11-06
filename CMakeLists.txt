@@ -31,7 +31,10 @@ add_library(pim_core STATIC
     src/core/pim.c
     src/core/calendar.c
     src/core/games.c
+    src/core/net.c
     src/core/storage.c
+    src/core/web.c
+    src/core/telnet.c
 )
 target_include_directories(pim_core PUBLIC include)
 target_compile_options(pim_core PRIVATE -Wall -Wextra -Wpedantic -Werror)
@@ -48,6 +51,26 @@ if(PIM_BUILD_TESTS)
     add_test(NAME pim_tests COMMAND pim_tests)
 endif()
 
+option(PIM_BUILD_UI_TESTS "Build the headless LVGL UI simulation tests" OFF)
+if(PIM_BUILD_UI_TESTS AND PIM_BUILD_TESTS)
+    set(PIM_LVGL_DIR "${CMAKE_CURRENT_LIST_DIR}/third_party/PicoCalc/Code/picocalc_lvgl_graphics_demo")
+    file(GLOB_RECURSE PIM_LVGL_SOURCES "${PIM_LVGL_DIR}/lib/lvgl/lvgl/src/*.c")
+    add_library(pim_lvgl_host STATIC ${PIM_LVGL_SOURCES})
+    target_compile_definitions(pim_lvgl_host PUBLIC LV_CONF_INCLUDE_SIMPLE LV_FONT_UNSCII_8=1 PIM_DEVICE_LV_CONF="${PIM_LVGL_DIR}/lv_conf.h" PIM_LV_MEM_KB=320)
+    target_include_directories(pim_lvgl_host PUBLIC "${CMAKE_CURRENT_LIST_DIR}/src/firmware/lvgl_conf" "${PIM_LVGL_DIR}" "${PIM_LVGL_DIR}/lib/lvgl")
+    target_compile_options(pim_lvgl_host PRIVATE -w)
+    add_executable(pim_ui_tests tests/ui_sim/ui_sim.c src/firmware/ui.c)
+    target_compile_definitions(pim_ui_tests PRIVATE PIM_ROOT="pim_sim_root")
+    target_include_directories(pim_ui_tests PRIVATE tests/ui_sim/stubs)
+    target_link_libraries(pim_ui_tests PRIVATE pim_core pim_lvgl_host m)
+    target_compile_options(pim_ui_tests PRIVATE -Wall -Wextra)
+    if(PIM_ENABLE_SANITIZERS AND CMAKE_C_COMPILER_ID MATCHES "GNU|Clang")
+        target_compile_options(pim_ui_tests PRIVATE -fsanitize=address,undefined)
+        target_link_options(pim_ui_tests PRIVATE -fsanitize=address,undefined)
+    endif()
+    add_test(NAME pim_ui_tests COMMAND pim_ui_tests)
+endif()
+
 if(PIM_BUILD_FIRMWARE)
     pico_sdk_init()
 
@@ -55,8 +78,9 @@ if(PIM_BUILD_FIRMWARE)
     add_subdirectory(${PICOCALC_LVGL_DIR}/i2ckbd picocalc_i2ckbd)
     add_subdirectory(${PICOCALC_LVGL_DIR}/lcdspi picocalc_lcdspi)
     add_subdirectory(${PICOCALC_LVGL_DIR}/lib/lvgl lvgl)
-    target_compile_definitions(lvgl PUBLIC LV_CONF_INCLUDE_SIMPLE)
-    target_include_directories(lvgl PUBLIC ${PICOCALC_LVGL_DIR})
+    target_compile_definitions(lvgl PUBLIC LV_CONF_INCLUDE_SIMPLE LV_FONT_UNSCII_8=1
+        PIM_DEVICE_LV_CONF="${PICOCALC_LVGL_DIR}/lv_conf.h")
+    target_include_directories(lvgl PUBLIC ${CMAKE_CURRENT_LIST_DIR}/src/firmware/lvgl_conf ${PICOCALC_LVGL_DIR})
 
     add_library(pim_vfs STATIC
         ${PICO_VFS_PATH}/src/blockdevice/sd.c
@@ -66,6 +90,8 @@ if(PIM_BUILD_FIRMWARE)
         ${PICO_VFS_PATH}/vendor/ff15/source/ffsystem.c
         ${PICO_VFS_PATH}/vendor/ff15/source/ffunicode.c
     )
+    target_include_directories(pim_core PRIVATE ${PICO_VFS_PATH}/include)
+    target_compile_definitions(pim_core PRIVATE PIM_VFS_DIRENT=1)
     target_include_directories(pim_vfs PUBLIC
         ${PICO_VFS_PATH}/include
         ${PICO_VFS_PATH}/include/filesystem/ChaN
@@ -82,6 +108,7 @@ if(PIM_BUILD_FIRMWARE)
         src/firmware/fs_init.c
         src/firmware/input.c
         src/firmware/ui.c
+        src/firmware/wifi.c
         src/firmware/vfs_compat.c
         ${PICOCALC_LVGL_DIR}/lv_port_disp_picocalc_ILI9488.c
     )
@@ -93,6 +120,7 @@ if(PIM_BUILD_FIRMWARE)
     )
     target_link_libraries(picocalc_pim PRIVATE
         pim_core pim_vfs pico_stdlib hardware_i2c hardware_spi i2ckbd lcdspi lvgl
+        pico_cyw43_arch_lwip_poll
     )
     target_compile_options(picocalc_pim PRIVATE -Wall -Wextra -Wpedantic)
     pico_enable_stdio_usb(picocalc_pim 0)

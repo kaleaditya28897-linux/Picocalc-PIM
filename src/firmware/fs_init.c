@@ -21,5 +21,14 @@ bool fs_init(void) {
         printf("Cannot create /PIM: %s\n", strerror(errno));
         return false;
     }
+    static const char *const directories[] = {
+        "/PIM/appointments", "/PIM/calendar", "/PIM/journal", "/PIM/notes", "/PIM/todos"
+    };
+    for (size_t i = 0; i < sizeof(directories) / sizeof(directories[0]); i++) {
+        if (mkdir(directories[i], 0777) != 0 && errno != EEXIST) {
+            printf("Cannot create %s: %s\n", directories[i], strerror(errno));
+            return false;
+        }
+    }
     return true;
 }

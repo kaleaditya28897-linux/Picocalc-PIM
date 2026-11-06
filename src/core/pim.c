@@ -100,7 +100,8 @@ void pim_sort_all(pim_database_t *database) {
 
 bool pim_add_appointment(pim_database_t *database, const pim_appointment_t *appointment) {
     if (database->appointment_count == PIM_MAX_APPOINTMENTS || !pim_date_is_valid(appointment->date) ||
-        appointment->minutes >= 24 * 60 || appointment->title[0] == '\0') return false;
+        appointment->minutes >= 24 * 60 || appointment->minutes + appointment->duration > 24 * 60 ||
+        appointment->title[0] == '\0') return false;
     database->appointments[database->appointment_count] = *appointment;
     database->appointments[database->appointment_count++].id = make_id(database);
     sort_appointments(database);
@@ -112,6 +113,18 @@ bool pim_delete_appointment(pim_database_t *database, size_t index) {
     remove_at(database->appointments, sizeof(database->appointments[0]),
               database->appointment_count--, index);
     return true;
+}
+
+size_t pim_appointments_on(const pim_database_t *database, pim_date_t date, size_t *indices,
+                           size_t max_indices) {
+    size_t count = 0;
+    for (size_t i = 0; i < database->appointment_count; i++) {
+        if (pim_date_compare(database->appointments[i].date, date) == 0) {
+            if (count < max_indices) indices[count] = i;
+            count++;
+        }
+    }
+    return count;
 }
 
 bool pim_add_todo(pim_database_t *database, const pim_todo_t *todo) {
@@ -206,4 +219,14 @@ const char *pim_priority_name(pim_priority_t priority) {
 const char *pim_mood_name(pim_mood_t mood) {
     static const char *const names[] = {"Great", "Good", "Okay", "Bad", "Terrible"};
     return mood <= PIM_MOOD_TERRIBLE ? names[mood] : "Unknown";
+}
+
+bool pim_battery_decode(const uint8_t reply[2], pim_battery_t *battery) {
+    uint8_t percent;
+    if (reply == NULL || battery == NULL || reply[0] != 0x0b) return false;
+    percent = reply[1] & 0x7f;
+    if (percent == 0 || percent > 100) return false;
+    battery->percent = percent;
+    battery->charging = (reply[1] & 0x80) != 0;
+    return true;
 }

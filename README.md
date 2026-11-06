@@ -4,9 +4,17 @@ PicoCalc PIM is a C11 firmware PDA for the ClockworkPi PicoCalc with a Raspberry
 
 ## Features
 
-- Calendar, appointments, priority to-dos, notes, and one journal entry per day with moods.
-- Three classic games: Tetris, a turn-based dungeon crawler, and Space Invaders.
+- A combined calendar/appointment app: arrow to a day and press Enter, then pick the start hour, minute and length with UP/DOWN (no typing dates), then enter a title and notes. Days with appointments show `*`. Journal entries use the same selected day.
+- Priority to-dos, notes, and one journal entry per day with moods.
+- Date and time entry: scroll the calendar continuously with the arrows, `,` `.` change month, `<` `>` change year, `T` jumps to today and `G` (or Go to) opens a DD-MM-YYYY picker; in the pickers you can type digits or use UP/DOWN. Set today stores the current date in `/PIM/today.cfg` (the device has no clock).
+- Theme switcher (Home → Theme): Amber, Green terminal and Manila (black on manila, easy on the eyes). The choice is saved in `/PIM/theme.cfg`.
+- Battery monitor on Home: percentage and charging state read from the PicoCalc keyboard MCU power gauge (refreshed every 15 s; shows "no data" if unavailable). The MCU only reports a valid level when running on battery first, then plugging in USB.
+- Startup clock: every boot asks for the date and time (prefilled from the last session, cannot be skipped). The clock then runs from that moment, is shown on Home, and drives "today" in Calendar and Journal. It is saved to `/PIM/today.cfg`.
+- Four graphical games: Tetris, a five-floor dungeon crawler, Space Invaders and Klondike Solitaire.
 - Keyboard-first controls: arrows navigate and control games, `Enter` activates/fires/drops, and `Esc` returns.
+- SD file manager and plain-text editor for `.txt`, `.c`, `.h`, and other small text files in `/PIM`.
+- SD file manager with folder navigation plus named-file and directory creation/deletion. The 8 px terminal editor shows 40 columns, soft-wraps long lines (no sideways scrolling) and supports 8 KiB files.
+- Wi-Fi (Home → Wi-Fi & web): network scanner with on-device password entry, saved networks, NTP time sync with a time zone setting, a browser interface to your PIM, `.ics` calendar import/export, and a Telnet client for BBSs (Home → Telnet).
 - Data is a CRC-checked snapshot at `/PIM/pim.dat`; a failed or missing SD card does not destroy in-memory data.
 
 ## Build and flash
@@ -36,6 +44,47 @@ tools/prepare-sd.sh --device /dev/sdX --yes
 
 Insert the card before starting the PicoCalc. If the card is absent or unreadable, the PDA continues without persistence for that session.
 
+The firmware also maintains human-readable exports after each PIM change:
+
+| Directory | Format |
+| --- | --- |
+| `/PIM/appointments/` | `appointments.csv` (`date,time,duration_minutes,title,description`) |
+| `/PIM/todos/` | `todos.csv` |
+| `/PIM/notes/` | one Markdown file per note |
+| `/PIM/journal/` | one `DD-MM-YYYY.md` file per entry |
+| `/PIM/calendar/` | `calendar.md` overview |
+
+These are generated views of the crash-safe `pim.dat` database. Edit them for reference or export, but use the PDA interface for PIM changes because the next save regenerates them.
+
+## Wi-Fi and web
+
+Open **Wi-Fi & web** on the home screen.
+
+- **Scan networks** lists nearby networks by signal; pick one and type its password. **Manual entry** is for hidden networks. Joined networks are remembered (up to four) in `/PIM/wifi.cfg` on the SD card, **Join saved** reconnects and **Forget saved** removes one. Passwords are stored in plain text on the SD card.
+- **Sync time** joins your most recent saved network if needed and sets the clock from `pool.ntp.org`. **Time zone** sets the UTC offset (default UTC+05:30). The startup screen has a **Sync (Wi-Fi)** button that does the same before you press Start.
+- After connecting (and from **Web address**) the screen shows `http://DEVICE:8080` and a 4-digit PIN that changes every connection.
+
+### Browser interface
+
+Open the address on a phone or PC on the same network and enter the PIN. You can view and edit the agenda, to-dos, notes, journal and any text or `.c` file in `/PIM`, download `calendar.ics`, and import an `.ics` file from `/import`. Changes are saved to the SD card straight away and the PDA returns to Home so its lists refresh. After 10 wrong PINs the server locks until you reconnect.
+
+Command-line use needs the PIN as a cookie:
+
+```bash
+curl -H 'Cookie: pim=PIN' -T notes.txt http://DEVICE:8080/upload/notes.txt   # up to 8 KiB
+curl -H 'Cookie: pim=PIN' http://DEVICE:8080/file/notes.txt -o notes.txt
+curl -H 'Cookie: pim=PIN' http://DEVICE:8080/calendar.ics -o pim.ics
+curl -H 'Cookie: pim=PIN' --data-binary @phone.ics http://DEVICE:8080/import
+```
+
+`.ics` import takes events and to-dos; all times (floating, UTC or TZID) are treated as local time, and duplicates are skipped. Subscribing to a calendar URL is not supported because those are HTTPS and the firmware has no TLS. Export from your phone or calendar service and import the file instead.
+
+The server speaks plain HTTP: the PIN is a speed bump, not encryption, so only use it on a network you trust. Firmware updates still require the BOOTSEL UF2 process.
+
+### Telnet (BBS)
+
+Home → **Telnet (BBS)**: enter a host and port (default 23) while connected to Wi-Fi. The terminal is 40 columns wide with 96 lines of scrollback. Colour and cursor codes are ignored (non-ASCII art shows as `#`). Up/Down scroll, typing returns to the newest line, Enter sends CR LF and Esc disconnects. Text is sent in the clear.
+
 ## Tests
 
 The application core is hardware-independent C and runs on the build host:
@@ -45,3 +94,7 @@ cmake --preset host-debug
 cmake --build --preset host-debug
 ctest --preset host-debug
 ```
+
+## UI simulation tests
+
+`cmake --preset host-ui && cmake --build --preset host-ui && ctest --preset host-ui` runs the real `ui.c` headlessly on LVGL (clang + ASan/UBSan) with synthetic key presses. It checks every screen, the SD file output, the amber-on-black palette pixel by pixel, memory leaks and a 12,000-key fuzz run.

@@ -7,6 +7,7 @@
 #include "pim/pim.h"
 #include "pim/storage.h"
 #include "pim/ui.h"
+#include "pim/wifi.h"
 
 bool fs_init(void);
 void pim_input_init(void);
@@ -19,11 +20,15 @@ int main(void) {
     lv_port_disp_init();
     pim_input_init();
     storage_available = fs_init();
-    if (storage_available) pim_storage_load("/PIM/pim.dat", &database);
+    if (storage_available) {
+        pim_storage_load("/PIM/pim.dat", &database);
+        pim_storage_export("/PIM", &database);
+    }
     else pim_database_init(&database);
     pim_ui_start(&database, storage_available ? "/PIM/pim.dat" : NULL);
     while (true) {
         lv_timer_handler();
+        pim_wifi_poll();
         sleep_ms(5);
         lv_tick_inc(5);
     }

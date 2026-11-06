@@ -21,6 +21,7 @@ typedef struct {
     uint16_t minutes;
     char title[48];
     char description[120];
+    uint16_t duration; /* minutes; 0 means unspecified. Placed last to keep the stored layout. */
 } pim_appointment_t;
 
 typedef struct {
@@ -61,9 +62,17 @@ uint8_t pim_days_in_month(uint16_t year, uint8_t month);
 bool pim_date_is_valid(pim_date_t date);
 int pim_date_compare(pim_date_t left, pim_date_t right);
 uint8_t pim_first_day_of_month(uint16_t year, uint8_t month);
+pim_date_t pim_date_shift(pim_date_t date, int days);
+/* Moves by whole months (12 per year), keeping the day where possible; the result stays in 2000-2099. */
+pim_date_t pim_date_add_months(pim_date_t date, int months);
+/* Typed-number entry: appends a digit while the value fits max_value, else restarts at that digit.
+ * Set *digits to 0 whenever the user moves to another field. */
+uint16_t pim_entry_digit(uint16_t current, uint8_t *digits, unsigned digit, uint16_t max_value);
 
 bool pim_add_appointment(pim_database_t *database, const pim_appointment_t *appointment);
 bool pim_delete_appointment(pim_database_t *database, size_t index);
+size_t pim_appointments_on(const pim_database_t *database, pim_date_t date, size_t *indices,
+                           size_t max_indices);
 bool pim_add_todo(pim_database_t *database, const pim_todo_t *todo);
 bool pim_delete_todo(pim_database_t *database, size_t index);
 void pim_toggle_todo(pim_database_t *database, size_t index);
@@ -77,5 +86,12 @@ bool pim_delete_journal(pim_database_t *database, size_t index);
 void pim_sort_all(pim_database_t *database);
 const char *pim_priority_name(pim_priority_t priority);
 const char *pim_mood_name(pim_mood_t mood);
+
+typedef struct {
+    uint8_t percent;
+    bool charging;
+} pim_battery_t;
+/* Decodes the keyboard MCU's battery register reply (register id, value); bit 7 of the value is the charging flag. */
+bool pim_battery_decode(const uint8_t reply[2], pim_battery_t *battery);
 
 #endif

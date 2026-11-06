@@ -12,6 +12,19 @@
       }
     },
     {
+      "name": "host-ui",
+      "generator": "Ninja",
+      "binaryDir": "${sourceDir}/build/host-ui",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Debug",
+        "PIM_BUILD_FIRMWARE": "OFF",
+        "PIM_BUILD_TESTS": "ON",
+        "PIM_BUILD_UI_TESTS": "ON",
+        "PIM_ENABLE_SANITIZERS": "ON",
+        "CMAKE_C_COMPILER": "clang"
+      }
+    },
+    {
       "name": "pico2w-release",
       "generator": "Ninja",
       "binaryDir": "${sourceDir}/build/pico2w-release",
@@ -25,10 +38,13 @@
   ],
   "buildPresets": [
     {"name": "host-debug", "configurePreset": "host-debug"},
+    {"name": "host-ui", "configurePreset": "host-ui"},
     {"name": "pico2w-release", "configurePreset": "pico2w-release"}
   ],
   "testPresets": [
     {"name": "host-debug", "configurePreset": "host-debug",
+     "output": {"outputOnFailure": true}},
+    {"name": "host-ui", "configurePreset": "host-ui",
      "output": {"outputOnFailure": true}}
   ]
 }

@@ -29,3 +29,41 @@ uint8_t pim_first_day_of_month(uint16_t year, uint8_t month) {
            century / 4 + 5 * century) % 7;
     return (uint8_t)((day + 5) % 7);
 }
+
+pim_date_t pim_date_shift(pim_date_t date, int days) {
+    while (days > 0) {
+        if (date.day < pim_days_in_month(date.year, date.month)) date.day++;
+        else { date.day = 1; if (++date.month == 13) { date.month = 1; date.year++; } }
+        days--;
+    }
+    while (days < 0) {
+        if (date.day > 1) date.day--;
+        else {
+            if (date.month == 1 && date.year <= 2000) return date;
+            if (--date.month == 0) { date.month = 12; date.year--; }
+            date.day = pim_days_in_month(date.year, date.month);
+        }
+        days++;
+    }
+    return date;
+}
+
+pim_date_t pim_date_add_months(pim_date_t date, int months) {
+    int index = (int)date.year * 12 + (date.month - 1) + months;
+    uint8_t last;
+    if (index < 2000 * 12) index = 2000 * 12;
+    if (index > 2099 * 12 + 11) index = 2099 * 12 + 11;
+    date.year = (uint16_t)(index / 12);
+    date.month = (uint8_t)(index % 12 + 1);
+    last = pim_days_in_month(date.year, date.month);
+    if (date.day > last) date.day = last;
+    return date;
+}
+
+uint16_t pim_entry_digit(uint16_t current, uint8_t *digits, unsigned digit, uint16_t max_value) {
+    uint32_t extended = (uint32_t)current * 10U + digit;
+    if (digit > 9) return current;
+    if (*digits == 0 || extended > max_value) { *digits = 1; return (uint16_t)digit; }
+    (*digits)++;
+    return (uint16_t)extended;
+}
