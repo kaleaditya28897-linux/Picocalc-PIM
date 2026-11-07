@@ -35,7 +35,16 @@ add_library(pim_core STATIC
     src/core/storage.c
     src/core/web.c
     src/core/telnet.c
+    src/core/sound.c
+    src/core/textfile.c
+    src/core/calc.c
+    src/core/recur.c
+    src/core/search.c
+    src/core/backup.c
+    src/core/sdgames.c
+    src/core/samples_data.c
 )
+target_link_libraries(pim_core PUBLIC m)
 target_include_directories(pim_core PUBLIC include)
 target_compile_options(pim_core PRIVATE -Wall -Wextra -Wpedantic -Werror)
 
@@ -49,6 +58,14 @@ if(PIM_BUILD_TESTS)
         target_link_options(pim_tests PRIVATE -fsanitize=address,undefined)
     endif()
     add_test(NAME pim_tests COMMAND pim_tests)
+    add_executable(pim_tools_tests tests/test_tools.c)
+    target_link_libraries(pim_tools_tests PRIVATE pim_core)
+    target_compile_options(pim_tools_tests PRIVATE -Wall -Wextra -Wpedantic -Werror)
+    if(PIM_ENABLE_SANITIZERS AND CMAKE_C_COMPILER_ID MATCHES "GNU|Clang")
+        target_compile_options(pim_tools_tests PRIVATE -fsanitize=address,undefined)
+        target_link_options(pim_tools_tests PRIVATE -fsanitize=address,undefined)
+    endif()
+    add_test(NAME pim_tools_tests COMMAND pim_tools_tests)
 endif()
 
 option(PIM_BUILD_UI_TESTS "Build the headless LVGL UI simulation tests" OFF)
@@ -109,6 +126,7 @@ if(PIM_BUILD_FIRMWARE)
         src/firmware/input.c
         src/firmware/ui.c
         src/firmware/wifi.c
+        src/firmware/sound.c
         src/firmware/vfs_compat.c
         ${PICOCALC_LVGL_DIR}/lv_port_disp_picocalc_ILI9488.c
     )
@@ -119,9 +137,10 @@ if(PIM_BUILD_FIRMWARE)
         ${PICO_VFS_PATH}/include
     )
     target_link_libraries(picocalc_pim PRIVATE
-        pim_core pim_vfs pico_stdlib hardware_i2c hardware_spi i2ckbd lcdspi lvgl
+        pim_core pim_vfs pico_stdlib hardware_i2c hardware_spi hardware_pwm hardware_watchdog i2ckbd lcdspi lvgl
         pico_cyw43_arch_lwip_poll
     )
+    target_compile_definitions(picocalc_pim PRIVATE PICO_STACK_SIZE=0x1000)
     target_compile_options(picocalc_pim PRIVATE -Wall -Wextra -Wpedantic)
     pico_enable_stdio_usb(picocalc_pim 0)
     pico_enable_stdio_uart(picocalc_pim 1)

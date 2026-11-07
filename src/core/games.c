@@ -1,4 +1,5 @@
 #include "pim/games.h"
+#include "pim/sdgames.h"
 
 #include <stddef.h>
 #include <stdio.h>
@@ -135,12 +136,12 @@ uint16_t pim_tetris_interval_ms(const pim_tetris_t *game) {
 static int8_t sign(int8_t value) { return (int8_t)((value > 0) - (value < 0)); }
 static int8_t absolute(int8_t value) { return value < 0 ? (int8_t)-value : value; }
 
-static bool dungeon_reachable(const pim_dungeon_t *game) {
+static bool dungeon_reachable(const pim_dungeon_t *game, int8_t start_x, int8_t start_y) {
     int8_t queue[PIM_DUNGEON_WIDTH * PIM_DUNGEON_HEIGHT][2];
     bool seen[PIM_DUNGEON_HEIGHT][PIM_DUNGEON_WIDTH] = {{false}};
     size_t head = 0, tail = 0;
     static const int8_t steps[4][2] = {{1, 0}, {-1, 0}, {0, 1}, {0, -1}};
-    queue[tail][0] = 1; queue[tail++][1] = 1; seen[1][1] = true;
+    queue[tail][0] = start_x; queue[tail++][1] = start_y; seen[start_y][start_x] = true;
     while (head < tail) {
         int8_t x = queue[head][0], y = queue[head][1];
         head++;
@@ -170,7 +171,33 @@ static void dungeon_place(pim_dungeon_t *game, char item, uint8_t count) {
     }
 }
 
+/* Builds the floor from <root>/games/dungeon/floorN.txt; leaves the game untouched when the file is missing or invalid. */
+static bool dungeon_load_floor(pim_dungeon_t *game) {
+    char text[12 * 17 + 1];
+    pim_dungeon_t trial = *game;
+    bool has_start = false, has_stairs = false;
+    if (!pim_game_floor_text(game->floor, text, sizeof(text))) return false;
+    memset(trial.enemy, 0, sizeof(trial.enemy));
+    trial.enemies = 0;
+    for (int8_t y = 0; y < PIM_DUNGEON_HEIGHT; y++) for (int8_t x = 0; x < PIM_DUNGEON_WIDTH; x++) {
+        char c = text[y * 17 + x];
+        bool border = x == 0 || y == 0 || x == PIM_DUNGEON_WIDTH - 1 || y == PIM_DUNGEON_HEIGHT - 1;
+        if (c == '@' && !has_start && !border) { has_start = true; trial.player_x = x; trial.player_y = y; c = '.'; }
+        else if (c == '>' && !has_stairs) has_stairs = true;
+        else if (c == 'M' && !border && trial.enemies < PIM_DUNGEON_MAX_ENEMIES) {
+            pim_enemy_t *enemy = &trial.enemy[trial.enemies++];
+            enemy->x = x; enemy->y = y; enemy->hp = (uint8_t)(2 + game->floor / 2); enemy->alive = true; c = '.';
+        } else if (c != '#' && c != '.' && c != '$' && c != '!') return false;
+        if (border && c != '#' && c != '>') return false;
+        trial.cells[y][x] = c;
+    }
+    if (!has_start || !has_stairs || !dungeon_reachable(&trial, trial.player_x, trial.player_y)) return false;
+    *game = trial;
+    return true;
+}
+
 static void dungeon_generate(pim_dungeon_t *game) {
+    if (dungeon_load_floor(game)) return;
     uint8_t wanted = (uint8_t)(2 + game->floor);
     bool reachable = false;
     if (wanted > PIM_DUNGEON_MAX_ENEMIES) wanted = PIM_DUNGEON_MAX_ENEMIES;
@@ -181,7 +208,7 @@ static void dungeon_generate(pim_dungeon_t *game) {
             game->cells[1 + random_next(&game->rng) % (PIM_DUNGEON_HEIGHT - 2)][1 + random_next(&game->rng) % (PIM_DUNGEON_WIDTH - 2)] = '#';
         game->cells[1][1] = '.';
         game->cells[PIM_DUNGEON_HEIGHT - 2][PIM_DUNGEON_WIDTH - 2] = '>';
-        reachable = dungeon_reachable(game);
+        reachable = dungeon_reachable(game, 1, 1);
     }
     if (!reachable) {
         for (int8_t y = 1; y < PIM_DUNGEON_HEIGHT - 1; y++) for (int8_t x = 1; x < PIM_DUNGEON_WIDTH - 1; x++) game->cells[y][x] = '.';
@@ -208,6 +235,12 @@ void pim_dungeon_reset(pim_dungeon_t *game, uint32_t seed) {
     game->rng = seed * 2654435761u + 777u;
     game->health = game->max_health = 20;
     game->floor = 1;
+    game->floors = PIM_DUNGEON_FLOORS;
+    {
+        long value;
+        if (pim_game_config("dungeon", "health", &value) && value >= 5 && value <= 99) game->health = game->max_health = (uint8_t)value;
+        if (pim_game_config("dungeon", "floors", &value) && value >= 1 && value <= 9) game->floors = (uint8_t)value;
+    }
     dungeon_generate(game);
     snprintf(game->message, sizeof(game->message), "Find the stairs >");
 }
@@ -279,7 +312,7 @@ void pim_dungeon_move(pim_dungeon_t *game, pim_direction_t direction) {
         game->health = (uint8_t)(game->health + 8 > game->max_health ? game->max_health : game->health + 8);
         snprintf(game->message, sizeof(game->message), "Potion! +HP");
     } else if (cell == '>') {
-        if (game->floor >= PIM_DUNGEON_FLOORS) { game->won = true; snprintf(game->message, sizeof(game->message), "You escaped!"); return; }
+        if (game->floor >= game->floors) { game->won = true; snprintf(game->message, sizeof(game->message), "You escaped!"); return; }
         game->floor++;
         game->health = (uint8_t)(game->health + 4 > game->max_health ? game->max_health : game->health + 4);
         dungeon_generate(game);

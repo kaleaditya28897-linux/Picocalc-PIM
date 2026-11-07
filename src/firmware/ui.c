@@ -9,11 +9,15 @@
 #include <unistd.h>
 
 #include "lvgl/lvgl.h"
+#include "pim/sound.h"
 #include "pico/time.h"
 #include "pim/games.h"
 #include "pim/net.h"
+#include "pim/sdgames.h"
 #include "pim/storage.h"
 #include "pim/telnet.h"
+#include "pim/textfile.h"
+#include "pim/tools.h"
 #include "pim/wifi.h"
 
 typedef enum { GAME_NONE, GAME_TETRIS, GAME_DUNGEON, GAME_INVADERS, GAME_SOLITAIRE } game_t;
@@ -21,7 +25,7 @@ typedef enum { GAME_NONE, GAME_TETRIS, GAME_DUNGEON, GAME_INVADERS, GAME_SOLITAI
 #define FILE_LIST_MAX 32
 #define FILE_NAME_MAX 48
 #define FILE_PATH_MAX 128
-#define FILE_TEXT_MAX 8192
+#define FILE_TEXT_MAX 4096
 
 typedef struct {
     pim_database_t *database;
@@ -48,7 +52,7 @@ typedef struct {
     bool file_is_directory[FILE_LIST_MAX];
     char current_directory[FILE_PATH_MAX];
     char file_name[FILE_NAME_MAX];
-    char file_text[FILE_TEXT_MAX + 1];
+    char file_text[2 * FILE_TEXT_MAX + 1];
 } ui_t;
 
 static ui_t ui;
@@ -65,6 +69,7 @@ static const theme_t themes[] = {
 #define THEME_COUNT (sizeof(themes) / sizeof(themes[0]))
 #define TODAY_FILE PIM_ROOT "/today.cfg"
 #define THEME_FILE PIM_ROOT "/theme.cfg"
+#define SOUND_FILE PIM_ROOT "/sound.cfg"
 static size_t theme_index;
 #define CRT_AMBER (themes[theme_index].fg)
 #define CRT_BG (themes[theme_index].bg)
@@ -102,6 +107,10 @@ static void delete_named(lv_event_t *event);
 static void directory_up(lv_event_t *event);
 static void wifi(lv_event_t *event);
 static void telnet(lv_event_t *event);
+static void tools_screen(lv_event_t *event);
+static void journal_write(lv_event_t *event);
+static void recur_reload(void);
+static void note_editor(lv_event_t *event);
 
 static uint32_t now(void) { return (uint32_t)(to_ms_since_boot(get_absolute_time()) / 1000U); }
 static void save(void) {
@@ -194,7 +203,7 @@ static void crt_dropdown(lv_obj_t *object) {
 static bool safe_file_name(const char *name) {
     size_t length = strlen(name);
     if (length == 0 || length >= FILE_NAME_MAX || strcmp(name, ".") == 0 ||
-        strcmp(name, "..") == 0 || strcmp(name, "pim.dat") == 0 || strcmp(name, "wifi.cfg") == 0 || strcmp(name, "theme.cfg") == 0 || strcmp(name, "today.cfg") == 0) return false;
+        strcmp(name, "..") == 0 || strcmp(name, "pim.dat") == 0 || strcmp(name, "wifi.cfg") == 0 || strcmp(name, "theme.cfg") == 0 || strcmp(name, "today.cfg") == 0 || strcmp(name, "sound.cfg") == 0 || strcmp(name, "recurring.cfg") == 0) return false;
     for (size_t i = 0; i < length; i++)
         if (!((name[i] >= 'a' && name[i] <= 'z') || (name[i] >= 'A' && name[i] <= 'Z') ||
               (name[i] >= '0' && name[i] <= '9') || name[i] == '.' || name[i] == '_' || name[i] == '-')) return false;
@@ -273,23 +282,45 @@ static void battery_refresh(lv_timer_t *timer) {
                   battery.charging ? " charging" : battery.percent <= 15 ? " LOW" : "");
     lv_label_set_text(ui.battery_obj, text_value);
 }
+static lv_obj_t *sound_button;
+static void sound_save(void) {
+    FILE *file = fopen(SOUND_FILE, "wb");
+    if (file == NULL) return;
+    fprintf(file, "%d\n", pim_sound_enabled() ? 1 : 0);
+    fclose(file);
+}
+static void sound_load(void) {
+    int value;
+    FILE *file = fopen(SOUND_FILE, "rb");
+    if (file == NULL) return;
+    if (fscanf(file, "%d", &value) == 1) pim_sound_set_enabled(value != 0);
+    fclose(file);
+}
+static void sound_toggle(lv_event_t *event) {
+    (void)event;
+    pim_sound_set_enabled(!pim_sound_enabled());
+    sound_save();
+    lv_label_set_text(lv_obj_get_child(sound_button, 0), pim_sound_enabled() ? "Sound: ON" : "Sound: OFF");
+    pim_sound_play(PIM_SOUND_SELECT);
+}
 static void home(lv_event_t *event) {
     lv_obj_t *first; (void)event; clear();
-    label("PicoCalc PIM", 102, 4);
-    first = button("Calendar", 10, 28, 145, home_calendar, NULL);
-    button("To-Do List", 165, 28, 145, todos, NULL);
-    button("Notes", 10, 60, 145, notes, NULL);
-    button("Journal", 165, 60, 145, home_journal, NULL);
-    button("Files", 10, 92, 145, file_list, NULL);
-    button("Text editor", 165, 92, 145, new_file, NULL);
-    button("Wi-Fi & web", 10, 124, 145, wifi, NULL);
-    button("Tetris", 165, 124, 145, tetris, NULL);
-    button("Dungeon RPG", 10, 156, 145, dungeon, NULL);
-    button("Space Invaders", 165, 156, 145, invaders, NULL);
-    button("Solitaire", 10, 188, 145, solitaire, NULL);
-    button("Theme", 165, 188, 145, theme_screen, NULL);
-    button("Telnet (BBS)", 10, 220, 300, telnet, NULL);
-    label(ui.storage_path ? "SD: /PIM/pim.dat" : "SD storage unavailable", 18, 252);
+    label("PicoCalc PIM", 102, 2);
+    first = button("Calendar", 10, 22, 145, home_calendar, NULL);
+    button("To-Do List", 165, 22, 145, todos, NULL);
+    button("Notes", 10, 52, 145, notes, NULL);
+    button("Journal", 165, 52, 145, home_journal, NULL);
+    button("Files", 10, 82, 145, file_list, NULL);
+    button("Text editor", 165, 82, 145, new_file, NULL);
+    button("Tools", 10, 112, 145, tools_screen, NULL);
+    button("Wi-Fi & web", 165, 112, 145, wifi, NULL);
+    button("Tetris", 10, 142, 145, tetris, NULL);
+    button("Dungeon RPG", 165, 142, 145, dungeon, NULL);
+    button("Space Invaders", 10, 172, 145, invaders, NULL);
+    button("Solitaire", 165, 172, 145, solitaire, NULL);
+    button("Theme", 10, 202, 145, theme_screen, NULL);
+    button("Telnet (BBS)", 165, 202, 145, telnet, NULL);
+    sound_button = button(pim_sound_enabled() ? "Sound: ON" : "Sound: OFF", 10, 232, 145, sound_toggle, NULL);
     label("ARROWS select ENTER open ESC home", 8, 268);
     ui.clock_obj = label("", 0, 284);
     lv_obj_set_width(ui.clock_obj, 320);
@@ -610,43 +641,139 @@ static void note_editor(lv_event_t *event) {
 }
 static void notes(lv_event_t *event) { (void)event; ui.selected = ui.database->note_count; note_editor(NULL); }
 
-static void save_journal(lv_event_t *event) {
-    pim_journal_entry_t value = {0}; (void)event;
-    value.date = ui.calendar;
-    value.mood = (pim_mood_t)lv_dropdown_get_selected(ui.choice); value.modified_at = now();
-    snprintf(value.content, sizeof(value.content), "%s", lv_textarea_get_text(ui.content));
-    if (!pim_add_or_update_journal(ui.database, &value)) { message("Not saved", "Enter text or use a valid date."); return; }
-    save(); journal(NULL);
+/* ---- Paged text editor: files of any size, one page at a time ---- */
+#define PAGE_STACK 256
+static struct {
+    char path[FILE_PATH_MAX], title[FILE_NAME_MAX];
+    uint32_t offset, stack[PAGE_STACK];
+    size_t length;
+    unsigned depth;
+    bool journal;
+    lv_event_cb_t back;
+} ed;
+
+static void editor_show(void);
+static void editor_open(const char *path, const char *title, bool journal, lv_event_cb_t back) {
+    snprintf(ed.path, sizeof(ed.path), "%s", path);
+    snprintf(ed.title, sizeof(ed.title), "%s", title);
+    ed.offset = 0; ed.depth = 0; ed.length = 0; ed.journal = journal; ed.back = back;
+    editor_show();
 }
-static void delete_journal(lv_event_t *event) {
-    char path[64];
-    size_t index = index_from_event(event);
-    pim_date_t date = ui.database->journal[index].date;
-    pim_delete_journal(ui.database, index);
-    if (ui.storage_path) {
-        snprintf(path, sizeof(path), PIM_ROOT "/journal/%02u-%02u-%04u.md", date.day, date.month, date.year);
-        remove(path);
+/* Writes the page back only when it changed, so browsing a large file never rewrites it. */
+static bool editor_commit(void) {
+    const char *current = lv_textarea_get_text(ui.content);
+    size_t length = strlen(current);
+    uint32_t size;
+    if (strcmp(current, ui.file_text) == 0) return true;
+    if (length >= sizeof(ui.file_text) ||
+        !pim_text_replace(ed.path, ed.offset, (uint32_t)ed.length, current, length)) {
+        char why[64];
+        snprintf(why, sizeof(why), "Write failed (error %d).\nTry again or free space.", pim_text_last_errno());
+        message("Not saved", why);
+        return false;
     }
-    save();
-    journal_list(NULL);
+    memcpy(ui.file_text, current, length + 1);
+    ed.length = length;
+    if (ed.journal && pim_text_size(ed.path, &size) && size == 0) remove(ed.path);
+    return true;
 }
-static void journal_detail(lv_event_t *event) {
-    ui.selected = index_from_event(event); pim_journal_entry_t *value = &ui.database->journal[ui.selected]; char detail[450]; lv_obj_t *first; clear();
-    snprintf(detail, sizeof(detail), "%02u-%02u-%04u  %s\n\n%s", value->date.day, value->date.month,
-             value->date.year, pim_mood_name(value->mood), value->content);
-    label(detail, 12, 24); first = button("Delete", 20, 260, 100, delete_journal, (void *)(uintptr_t)(ui.selected + 1));
-    button("Back", 190, 260, 100, journal_list, NULL); focus(first);
+static void editor_save(lv_event_t *event) { (void)event; if (editor_commit()) ed.back(NULL); }
+static void editor_cancel(lv_event_t *event) { (void)event; ed.back(NULL); }
+static void editor_delete(lv_event_t *event) {
+    (void)event;
+    if (remove(ed.path) != 0) { message("Not deleted", "The file may not exist yet."); return; }
+    ed.back(NULL);
 }
+static void editor_next(lv_event_t *event) {
+    uint32_t size = 0, next;
+    (void)event;
+    if (!editor_commit()) return;
+    pim_text_size(ed.path, &size);
+    next = ed.offset + (uint32_t)ed.length;
+    if (next >= size && ed.length == 0) return;
+    if (ed.depth < PAGE_STACK) ed.stack[ed.depth] = ed.offset;
+    ed.depth++;
+    ed.offset = next;
+    editor_show();
+}
+static void editor_previous(lv_event_t *event) {
+    (void)event;
+    if (ed.depth == 0 || !editor_commit()) return;
+    ed.depth--;
+    ed.offset = ed.depth < PAGE_STACK ? ed.stack[ed.depth] : pim_text_previous(ed.path, ed.offset);
+    editor_show();
+}
+static void editor_show(void) {
+    char head[64];
+    size_t length = 0;
+    uint32_t size = 0;
+    bool more = false;
+    lv_obj_t *first;
+    clear();
+    if (!pim_text_page(ed.path, ed.offset, ui.file_text, PIM_PAGE_BYTES, &length, &more)) { ui.file_text[0] = '\0'; length = 0; }
+    ed.length = length;
+    pim_text_size(ed.path, &size);
+    snprintf(head, sizeof(head), "%.22s  page %u  %u%%", ed.title, ed.depth + 1,
+             size == 0 ? 0U : (unsigned)(((uint64_t)ed.offset + length) * 100U / size));
+    label(head, 8, 6);
+    ui.content = text("Type here", 0, 24, 320, 206, false);
+    lv_obj_set_style_pad_hor(ui.content, 0, 0);
+    lv_obj_set_style_border_width(ui.content, 0, 0);
+    lv_textarea_set_max_length(ui.content, 2 * PIM_PAGE_BYTES - 1);
+    lv_obj_set_style_text_font(ui.content, &lv_font_unscii_8, 0);
+    lv_obj_set_style_text_line_space(ui.content, 0, 0);
+    lv_obj_set_scrollbar_mode(ui.content, LV_SCROLLBAR_MODE_AUTO);
+    lv_obj_remove_flag(ui.content, LV_OBJ_FLAG_SCROLL_ON_FOCUS);
+    lv_textarea_set_text(ui.content, ui.file_text);
+    first = button("Save", 12, 234, 96, editor_save, NULL);
+    button("Prev", 112, 234, 96, editor_previous, NULL);
+    button("Next", 212, 234, 96, editor_next, NULL);
+    button("Delete", 12, 266, 140, editor_delete, NULL);
+    button(ed.journal ? "Journal" : "Files", 168, 266, 140, editor_cancel, NULL);
+    focus(first);
+}
+
+/* ---- Journal: one free-form text file per day ---- */
+static void journal_write(lv_event_t *event) {
+    char path[FILE_PATH_MAX], title[FILE_NAME_MAX];
+    (void)event;
+    if (ui.storage_path == NULL) { message("No SD card", "The journal needs SD storage."); return; }
+    mkdir(PIM_ROOT "/journal", 0777);
+    if (!pim_journal_path(PIM_ROOT, ui.calendar, path, sizeof(path))) return;
+    format_date(title, sizeof(title), ui.calendar);
+    editor_open(path, title, true, journal);
+}
+static void journal_open_entry(lv_event_t *event) {
+    pim_date_t *dates = (pim_date_t *)lv_event_get_user_data(event);
+    ui.calendar = *dates;
+    journal_write(NULL);
+}
+static void journal_remove(lv_event_t *event) {
+    (void)event;
+    if (!pim_journal_delete(PIM_ROOT, ui.calendar)) message("Not deleted", "There is no entry for this day.");
+    journal(NULL);
+}
+#define JOURNAL_LIST_MAX 40
 static void journal_list(lv_event_t *event) {
-    lv_obj_t *list, *first; (void)event; clear(); label("Journal", 132, 8);
+    static pim_date_t dates[JOURNAL_LIST_MAX];
+    lv_obj_t *list, *first;
+    size_t total = 0, count;
+    (void)event; clear(); label("Journal entries", 100, 8);
     first = button("Back", 112, 280, 95, journal, NULL);
     list = lv_list_create(lv_screen_active()); lv_obj_set_pos(list, 8, 30); lv_obj_set_size(list, 304, 246); crt_style(list, true);
-    for (size_t i = 0; i < ui.database->journal_count; i++) {
-        pim_journal_entry_t *value = &ui.database->journal[i]; char row[80];
-        snprintf(row, sizeof(row), "%02u-%02u-%04u [%s]", value->date.day, value->date.month,
-                 value->date.year, pim_mood_name(value->mood));
+    count = pim_journal_list(PIM_ROOT, dates, JOURNAL_LIST_MAX, &total);
+    for (size_t i = 0; i < count; i++) {
+        char row[80], date[16], preview[32];
+        format_date(date, sizeof(date), dates[i]);
+        pim_journal_preview(PIM_ROOT, dates[i], preview, sizeof(preview));
+        snprintf(row, sizeof(row), "%s %s", date, preview);
         lv_obj_t *item = lv_list_add_button(list, NULL, row);
-        lv_obj_add_event_cb(item, journal_detail, LV_EVENT_CLICKED, (void *)(uintptr_t)(i + 1)); style_list_item(item);
+        lv_obj_add_event_cb(item, journal_open_entry, LV_EVENT_CLICKED, &dates[i]); style_list_item(item);
+    }
+    if (total > count) {
+        char more[40];
+        snprintf(more, sizeof(more), "%u older entries not shown", (unsigned)(total - count));
+        label(more, 12, 262);
     }
     focus(first);
 }
@@ -655,80 +782,32 @@ static void journal_shift(lv_event_t *event) {
     journal(NULL);
 }
 static void journal(lv_event_t *event) {
-    lv_obj_t *first; char date[16]; (void)event; clear(); label("Journal", 132, 6);
+    lv_obj_t *first, *preview; char date[16], path[FILE_PATH_MAX], body[200] = "";
+    size_t length; bool more, exists; (void)event; clear(); label("Journal", 132, 6);
     format_date(date, sizeof(date), ui.calendar);
     first = button("<", 12, 32, 52, journal_shift, (void *)(intptr_t)-1);
     button(date, 76, 32, 168, date_picker_journal, NULL); button(">", 256, 32, 52, journal_shift, (void *)(intptr_t)1);
-    ui.choice = lv_dropdown_create(lv_screen_active()); lv_dropdown_set_options(ui.choice, "Great\nGood\nOkay\nBad\nTerrible");
-    lv_dropdown_set_selected(ui.choice, PIM_MOOD_OKAY, LV_ANIM_OFF); lv_obj_set_pos(ui.choice, 12, 70); lv_obj_set_size(ui.choice, 140, 28); crt_dropdown(ui.choice);
-    ui.content = text("What's on your mind?", 12, 106, 296, 100, false);
-    for (size_t i = 0; i < ui.database->journal_count; i++) {
-        if (pim_date_compare(ui.database->journal[i].date, ui.calendar) == 0) {
-            lv_textarea_set_text(ui.content, ui.database->journal[i].content);
-            lv_dropdown_set_selected(ui.choice, (uint32_t)ui.database->journal[i].mood, LV_ANIM_OFF);
-        }
-    }
-    button("Save", 12, 222, 90, save_journal, NULL);
-    button("View", 116, 222, 90, journal_list, NULL); button("Back", 220, 222, 90, home, NULL); focus(first);
+    exists = pim_journal_exists(PIM_ROOT, ui.calendar);
+    if (exists && pim_journal_path(PIM_ROOT, ui.calendar, path, sizeof(path))) pim_text_page(path, 0, body, sizeof(body), &length, &more);
+    preview = label(exists ? body : "No entry for this day.\nSelect Write to start one.", 12, 76);
+    lv_obj_set_size(preview, 296, 130); lv_label_set_long_mode(preview, LV_LABEL_LONG_DOT);
+    button(exists ? "Edit" : "Write", 12, 222, 90, journal_write, NULL);
+    button("View", 116, 222, 90, journal_list, NULL); button("Back", 220, 222, 90, home, NULL);
+    if (exists) button("Delete", 12, 254, 90, journal_remove, NULL);
+    focus(first);
 }
 
-static void save_file(lv_event_t *event) {
-    char path[FILE_PATH_MAX];
-    FILE *file;
-    const char *content = lv_textarea_get_text(ui.content);
-    size_t content_length;
-    bool written;
-    (void)event;
-    if (!join_path(path, sizeof(path), ui.current_directory, ui.file_name)) {
-        message("Path too long", "Use a shallower directory.");
-        return;
-    }
-    file = fopen(path, "wb");
-    if (file == NULL) {
-        message("Not saved", "Check that the SD card is available.");
-        return;
-    }
-    content_length = strlen(content);
-    written = fwrite(content, 1, content_length, file) == content_length;
-    if (fclose(file) != 0 || !written) {
-        message("Not saved", "Check that the SD card is available.");
-        return;
-    }
-    file_list(NULL);
-}
-static void delete_file(lv_event_t *event) {
-    char path[FILE_PATH_MAX];
-    (void)event;
-    if (!join_path(path, sizeof(path), ui.current_directory, ui.file_name)) {
-        message("Path too long", "Use a shallower directory.");
-        return;
-    }
-    if (unlink(path) != 0) { message("Not deleted", "Check that the SD card is available."); return; }
-    ui.file_name[0] = '\0';
-    file_list(NULL);
-}
 static void file_editor(lv_event_t *event) {
-    lv_obj_t *first;
+    char path[FILE_PATH_MAX];
     (void)event;
-    clear();
-    label(ui.file_name, 12, 6);
-    ui.content = text("Type here. 8 KiB maximum", 0, 24, 320, 232, false);
-    lv_obj_set_style_pad_hor(ui.content, 0, 0);
-    lv_obj_set_style_border_width(ui.content, 0, 0);
-    lv_textarea_set_max_length(ui.content, FILE_TEXT_MAX);
-    lv_obj_set_style_text_font(ui.content, &lv_font_unscii_8, 0);
-    lv_obj_set_style_text_line_space(ui.content, 0, 0);
-    lv_obj_set_scrollbar_mode(ui.content, LV_SCROLLBAR_MODE_AUTO);
-    lv_obj_remove_flag(ui.content, LV_OBJ_FLAG_SCROLL_ON_FOCUS);
-    lv_textarea_set_text(ui.content, ui.file_text);
-    first = button("Save", 12, 262, 90, save_file, NULL);
-    button("Delete", 116, 262, 90, delete_file, NULL);
-    button("Files", 220, 262, 90, file_list, NULL);
-    focus(first);
+    if (!join_path(path, sizeof(path), ui.current_directory, ui.file_name)) {
+        message("Path too long", "Use a shallower directory.");
+        return;
+    }
+    editor_open(path, ui.file_name, false, file_list);
 }
 static void open_file(lv_event_t *event) {
     char path[FILE_PATH_MAX];
-    FILE *file;
     size_t index = index_from_event(event);
     if (index >= FILE_LIST_MAX) return;
     if (ui.file_is_directory[index]) {
@@ -746,16 +825,6 @@ static void open_file(lv_event_t *event) {
         message("Path too long", "Use a shallower directory.");
         return;
     }
-    file = fopen(path, "rb");
-    if (file == NULL) { message("Not opened", "Check that the SD card is available."); return; }
-    size_t length = fread(ui.file_text, 1, FILE_TEXT_MAX, file);
-    if (fgetc(file) != EOF) {
-        fclose(file);
-        message("File too large", "Text editor files are limited to 8 KiB.");
-        return;
-    }
-    fclose(file);
-    ui.file_text[length] = '\0';
     file_editor(NULL);
 }
 static void create_file(lv_event_t *event) {
@@ -783,7 +852,6 @@ static void create_file(lv_event_t *event) {
         return;
     }
     snprintf(ui.file_name, sizeof(ui.file_name), "%s", name);
-    ui.file_text[0] = '\0';
     file_editor(NULL);
 }
 static void new_file(lv_event_t *event) {
@@ -826,7 +894,7 @@ static void new_directory(lv_event_t *event) {
     focus(first);
 }
 static bool protected_directory(const char *name) {
-    static const char *const names[] = {"appointments", "calendar", "journal", "notes", "todos"};
+    static const char *const names[] = {"appointments", "backup", "calendar", "games", "journal", "notes", "todos"};
     for (size_t i = 0; i < sizeof(names) / sizeof(names[0]); i++)
         if (strcmp(name, names[i]) == 0) return true;
     return false;
@@ -909,6 +977,371 @@ static void file_list(lv_event_t *event) {
             count++;
         }
         closedir(directory);
+    }
+    focus(first);
+}
+
+/* ---- Tools: search, calculator, timer, recurring appointments, backup ---- */
+static void tools_screen(lv_event_t *event);
+static void search_screen(lv_event_t *event);
+static void calc_screen(lv_event_t *event);
+static void recur_screen(lv_event_t *event);
+static void timer_screen(lv_event_t *event);
+static void backup_screen(lv_event_t *event);
+static void busy(const char *title, const char *detail);
+
+static void tools_screen(lv_event_t *event) {
+    lv_obj_t *first; (void)event; clear(); label("Tools", 134, 6);
+    first = button("Search", 10, 34, 145, search_screen, NULL);
+    button("Calculator", 165, 34, 145, calc_screen, NULL);
+    button("Timer", 10, 68, 145, timer_screen, NULL);
+    button("Recurring", 165, 68, 145, recur_screen, NULL);
+    button("Backup", 10, 102, 145, backup_screen, NULL);
+    button("Back", 165, 102, 145, home, NULL);
+    focus(first);
+}
+
+/* Search */
+#define SEARCH_MAX 24
+static pim_hit_t search_hits[SEARCH_MAX];
+static size_t search_count;
+static char search_query[40];
+static bool search_done;
+static void search_open_hit(lv_event_t *event) {
+    const pim_hit_t *hit = &search_hits[index_from_event(event)];
+    const char *name;
+    switch (hit->kind) {
+    case PIM_HIT_APPOINTMENT: ui.calendar = hit->date; day_view(NULL); break;
+    case PIM_HIT_TODO: todo_list(NULL); break;
+    case PIM_HIT_NOTE: ui.selected = hit->index; note_editor(NULL); break;
+    case PIM_HIT_JOURNAL: ui.calendar = hit->date; journal_write(NULL); break;
+    default:
+        name = strrchr(hit->path, '/');
+        editor_open(hit->path, name != NULL ? name + 1 : hit->path, false, search_screen);
+        break;
+    }
+}
+static void search_run(lv_event_t *event) {
+    (void)event;
+    snprintf(search_query, sizeof(search_query), "%s", lv_textarea_get_text(ui.title));
+    if (search_query[0] == '\0') { message("Search", "Type a word to look for."); return; }
+    busy("Searching", "Please wait...");
+    pim_system_busy(true);
+    search_count = pim_search(PIM_ROOT, ui.database, search_query, search_hits, SEARCH_MAX);
+    pim_system_busy(false);
+    search_done = true;
+    search_screen(NULL);
+}
+static void search_enter(lv_event_t *event) { if (lv_event_get_code(event) == LV_EVENT_READY) search_run(NULL); }
+static void search_screen(lv_event_t *event) {
+    lv_obj_t *list, *input;
+    (void)event; clear(); label("Search", 134, 4);
+    input = text("word or phrase", 8, 22, 304, 30, true);
+    ui.title = input;
+    lv_textarea_set_max_length(input, sizeof(search_query) - 1);
+    lv_textarea_set_text(input, search_query);
+    lv_obj_add_event_cb(input, search_enter, LV_EVENT_READY, NULL);
+    button("Search", 8, 56, 145, search_run, NULL); button("Back", 167, 56, 145, tools_screen, NULL);
+    list = lv_list_create(lv_screen_active()); lv_obj_set_pos(list, 8, 90); lv_obj_set_size(list, 304, 220); crt_style(list, true);
+    if (search_done && search_count == 0) label("No matches.", 16, 100);
+    for (size_t i = 0; search_done && i < search_count; i++) {
+        static const char tags[] = "ATNJF";
+        char row[120];
+        snprintf(row, sizeof(row), "%c %s: %s", tags[search_hits[i].kind], search_hits[i].title, search_hits[i].snippet);
+        lv_obj_t *item = lv_list_add_button(list, NULL, row);
+        lv_obj_add_event_cb(item, search_open_hit, LV_EVENT_CLICKED, (void *)(uintptr_t)(i + 1)); style_list_item(item);
+    }
+    focus(input);
+}
+
+/* Calculator */
+#define CALC_LINES 5
+static char calc_log[CALC_LINES][2][40];
+static size_t calc_used;
+static double calc_answer;
+static bool calc_degrees = true, calc_have_answer;
+static lv_obj_t *calc_view, *calc_mode, *calc_preview;
+static size_t calc_recall;
+static void calc_refresh(void) {
+    char body[CALC_LINES * 90] = "";
+    for (size_t i = 0; i < calc_used; i++) {
+        size_t length = strlen(body);
+        snprintf(body + length, sizeof(body) - length, "%s\n   = %s\n", calc_log[i][0], calc_log[i][1]);
+    }
+    lv_label_set_text(calc_view, body);
+}
+/* Shows the answer while you type, so you can see it before pressing Enter. */
+static void calc_changed(lv_event_t *event) {
+    char error[32], shown[32], line[48];
+    double value;
+    const char *expression = lv_textarea_get_text(ui.title);
+    (void)event;
+    if (calc_have_answer && expression[0] != '\0' && expression[1] == '\0' && strchr("+-*/^%", expression[0]) != NULL) {
+        char continued[8];
+        snprintf(continued, sizeof(continued), "ans%c", expression[0]);
+        lv_textarea_set_text(ui.title, continued);
+        return;
+    }
+    if (expression[0] != '\0' && pim_calc_eval(expression, calc_answer, calc_degrees, &value, error, sizeof(error))) {
+        pim_calc_format(value, shown, sizeof(shown));
+        snprintf(line, sizeof(line), "= %s", shown);
+    } else line[0] = '\0';
+    lv_label_set_text(calc_preview, line);
+}
+static void calc_enter(lv_event_t *event) {
+    char error[32], shown[32];
+    double value;
+    const char *expression = lv_textarea_get_text(ui.title);
+    if (lv_event_get_code(event) != LV_EVENT_READY || expression[0] == '\0') return;
+    if (calc_used == CALC_LINES) { memmove(calc_log[0], calc_log[1], sizeof(calc_log[0]) * (CALC_LINES - 1)); calc_used--; }
+    snprintf(calc_log[calc_used][0], sizeof(calc_log[0][0]), "%s", expression);
+    if (pim_calc_eval(expression, calc_answer, calc_degrees, &value, error, sizeof(error))) {
+        pim_calc_format(value, shown, sizeof(shown));
+        calc_answer = value; calc_have_answer = true;
+        lv_textarea_set_text(ui.title, "");
+    } else snprintf(shown, sizeof(shown), "%s", error);
+    snprintf(calc_log[calc_used][1], sizeof(calc_log[0][1]), "%s", shown);
+    calc_used++;
+    calc_recall = calc_used;
+    calc_refresh();
+}
+/* UP/DOWN step through earlier expressions so they can be corrected and re-run. */
+static void calc_key(lv_event_t *event) {
+    uint32_t key = lv_event_get_key(event);
+    if (calc_used == 0 || (key != LV_KEY_UP && key != LV_KEY_DOWN)) return;
+    if (key == LV_KEY_UP && calc_recall > 0) calc_recall--;
+    else if (key == LV_KEY_DOWN && calc_recall < calc_used) calc_recall++;
+    lv_textarea_set_text(ui.title, calc_recall < calc_used ? calc_log[calc_recall][0] : "");
+}
+static void calc_toggle(lv_event_t *event) {
+    (void)event;
+    calc_degrees = !calc_degrees;
+    lv_label_set_text(lv_obj_get_child(calc_mode, 0), calc_degrees ? "Deg" : "Rad");
+    calc_changed(NULL);
+}
+static void calc_clear(lv_event_t *event) {
+    (void)event; calc_used = calc_recall = 0; calc_answer = 0; calc_have_answer = false;
+    calc_refresh(); lv_textarea_set_text(ui.title, "");
+}
+static void calc_screen(lv_event_t *event) {
+    lv_obj_t *input;
+    (void)event; clear(); label("Calculator", 120, 4);
+    input = text("type e.g. 2+3*4", 8, 22, 304, 30, true);
+    ui.title = input;
+    lv_textarea_set_max_length(input, 60);
+    lv_obj_add_event_cb(input, calc_enter, LV_EVENT_READY, NULL);
+    lv_obj_add_event_cb(input, calc_changed, LV_EVENT_VALUE_CHANGED, NULL);
+    lv_obj_add_event_cb(input, calc_key, LV_EVENT_KEY, NULL);
+    calc_preview = label("", 12, 56);
+    calc_view = label("", 12, 78);
+    lv_obj_set_width(calc_view, 296);
+    label("ENTER = solve   UP = recall\n+ - * / after a result continues it\nsin cos tan sqrt ln log abs  pi e ans\n^ power  % remainder  ( ) brackets", 8, 232);
+    calc_mode = button(calc_degrees ? "Deg" : "Rad", 8, 290, 90, calc_toggle, NULL);
+    button("Clear", 115, 290, 90, calc_clear, NULL); button("Back", 222, 290, 90, tools_screen, NULL);
+    calc_recall = calc_used;
+    calc_refresh();
+    focus(input);
+}
+
+/* Basic stopwatch and countdown; the time keeps running when you leave the screen */
+static bool sw_running, cd_running, timer_countdown;
+static uint32_t sw_base_ms, sw_start, cd_left_ms, cd_end;
+static lv_obj_t *timer_view, *timer_start;
+static uint32_t ticks_ms(void) { return (uint32_t)to_ms_since_boot(get_absolute_time()); }
+static uint32_t stopwatch_ms(void) { return sw_running ? sw_base_ms + (ticks_ms() - sw_start) : sw_base_ms; }
+static uint32_t countdown_ms(void) {
+    int32_t left = (int32_t)(cd_end - ticks_ms());
+    if (!cd_running) return cd_left_ms;
+    if (left > 0) return (uint32_t)left;
+    cd_running = false; cd_left_ms = 0;
+    return 0;
+}
+static void timer_refresh(lv_timer_t *timer) {
+    char shown[32], line[64];
+    uint32_t ms;
+    (void)timer;
+    if (timer_view == NULL || timer_start == NULL) return;
+    ms = timer_countdown ? countdown_ms() : stopwatch_ms();
+    pim_clock_format(ms, !timer_countdown, shown, sizeof(shown));
+    snprintf(line, sizeof(line), "%s\n%s", timer_countdown ? (ms == 0 && !cd_running ? "COUNTDOWN  DONE" : "COUNTDOWN") : "STOPWATCH", shown);
+    lv_label_set_text(timer_view, line);
+    lv_label_set_text(lv_obj_get_child(timer_start, 0), (timer_countdown ? cd_running : sw_running) ? "Stop" : "Start");
+}
+static void timer_start_stop(lv_event_t *event) {
+    (void)event;
+    if (timer_countdown) {
+        if (cd_running) { cd_left_ms = countdown_ms(); cd_running = false; }
+        else if (cd_left_ms > 0) { cd_end = ticks_ms() + cd_left_ms; cd_running = true; }
+    } else if (sw_running) { sw_base_ms = stopwatch_ms(); sw_running = false; }
+    else { sw_start = ticks_ms(); sw_running = true; }
+    timer_refresh(NULL);
+}
+static void timer_reset(lv_event_t *event) {
+    (void)event;
+    if (timer_countdown) { cd_running = false; cd_left_ms = 0; } else { sw_running = false; sw_base_ms = 0; }
+    timer_refresh(NULL);
+}
+static void timer_mode(lv_event_t *event) { (void)event; timer_countdown = !timer_countdown; timer_refresh(NULL); }
+static void timer_add(lv_event_t *event) {
+    uint32_t add = (uint32_t)(uintptr_t)lv_event_get_user_data(event) * 60000U;
+    if (!timer_countdown) return;
+    if (cd_running) cd_end += add; else cd_left_ms += add;
+    if (cd_left_ms > 99U * 3600000U) cd_left_ms = 99U * 3600000U;
+    timer_refresh(NULL);
+}
+static void timer_gone(lv_event_t *event) {
+    lv_obj_t *object = lv_event_get_target_obj(event);
+    if (object == timer_view) timer_view = NULL;
+    if (object == timer_start) timer_start = NULL;
+}
+static void timer_screen(lv_event_t *event) {
+    lv_obj_t *first; (void)event; clear(); label("Timer", 134, 4);
+    timer_view = label("", 60, 40);
+    lv_obj_set_width(timer_view, 200); lv_obj_set_style_text_align(timer_view, LV_TEXT_ALIGN_CENTER, 0);
+    first = timer_start = button("Start", 12, 110, 145, timer_start_stop, NULL);
+    button("Reset", 165, 110, 145, timer_reset, NULL);
+    button("Mode", 12, 148, 145, timer_mode, NULL);
+    button("+1 min", 165, 148, 70, timer_add, (void *)(uintptr_t)1);
+    button("+5", 240, 148, 70, timer_add, (void *)(uintptr_t)5);
+    button("Back", 12, 186, 145, tools_screen, NULL);
+    label("Mode switches stopwatch/countdown.", 12, 230);
+    lv_obj_add_event_cb(timer_view, timer_gone, LV_EVENT_DELETE, NULL);
+    lv_obj_add_event_cb(timer_start, timer_gone, LV_EVENT_DELETE, NULL);
+    timer_refresh(NULL);
+    ui.timer = lv_timer_create(timer_refresh, 100, NULL);
+    focus(first);
+}
+
+/* Recurring appointments (stored in /PIM/recurring.cfg) */
+static pim_recur_t recur[PIM_RECUR_MAX];
+static size_t recur_count;
+static void recur_reload(void) { recur_count = pim_recur_load(PIM_ROOT, recur, PIM_RECUR_MAX); }
+static void recur_detail(lv_event_t *event);
+static void recur_add(lv_event_t *event);
+static void recur_open(lv_event_t *event) { ui.selected = index_from_event(event); recur_detail(NULL); }
+static void recur_remove(lv_event_t *event) {
+    (void)event;
+    if (ui.selected < recur_count) {
+        memmove(&recur[ui.selected], &recur[ui.selected + 1], (recur_count - ui.selected - 1) * sizeof(recur[0]));
+        recur_count--;
+        if (!pim_recur_save(PIM_ROOT, recur, recur_count)) message("Not saved", "Check that the SD card is available.");
+    }
+    recur_screen(NULL);
+}
+static void recur_detail(lv_event_t *event) {
+    char body[160], date[16];
+    lv_obj_t *first; (void)event; clear();
+    if (ui.selected >= recur_count) { recur_screen(NULL); return; }
+    format_date(date, sizeof(date), recur[ui.selected].start);
+    snprintf(body, sizeof(body), "%s\n\nRepeats %s at %02u:%02u\nstarting %s", recur[ui.selected].title,
+             pim_recur_name(recur[ui.selected].freq), recur[ui.selected].minutes / 60, recur[ui.selected].minutes % 60, date);
+    label(body, 12, 24);
+    first = button("Delete", 20, 260, 100, recur_remove, NULL);
+    button("Back", 190, 260, 100, recur_screen, NULL); focus(first);
+}
+static void recur_screen(lv_event_t *event) {
+    lv_obj_t *list, *first; (void)event; clear(); label("Recurring appointments", 70, 8);
+    first = button("Add", 12, 280, 90, recur_add, NULL); button("Back", 218, 280, 90, tools_screen, NULL);
+    list = lv_list_create(lv_screen_active()); lv_obj_set_pos(list, 8, 30); lv_obj_set_size(list, 304, 246); crt_style(list, true);
+    for (size_t i = 0; i < recur_count; i++) {
+        char row[80];
+        snprintf(row, sizeof(row), "%c %02u:%02u %s", recur[i].freq, recur[i].minutes / 60, recur[i].minutes % 60, recur[i].title);
+        lv_obj_t *item = lv_list_add_button(list, NULL, row);
+        lv_obj_add_event_cb(item, recur_open, LV_EVENT_CLICKED, (void *)(uintptr_t)(i + 1)); style_list_item(item);
+    }
+    focus(first);
+}
+static lv_obj_t *recur_date, *recur_time;
+static void recur_save_form(lv_event_t *event) {
+    unsigned day, month, year, hour, minute;
+    char tail, title[sizeof(recur[0].title)];
+    pim_recur_t item = {0};
+    (void)event;
+    snprintf(title, sizeof(title), "%s", lv_textarea_get_text(ui.title));
+    if (title[0] == '\0') { message("Not saved", "Enter a title."); return; }
+    if (sscanf(lv_textarea_get_text(recur_date), "%u-%u-%u%c", &day, &month, &year, &tail) != 3 || year < 2000 || year > 2099 ||
+        !pim_date_is_valid((pim_date_t){(uint16_t)year, (uint8_t)month, (uint8_t)day})) { message("Not saved", "Date must be DD-MM-YYYY."); return; }
+    if (sscanf(lv_textarea_get_text(recur_time), "%u:%u%c", &hour, &minute, &tail) != 2 || hour > 23 || minute > 59) { message("Not saved", "Time must be HH:MM."); return; }
+    if (recur_count >= PIM_RECUR_MAX) { message("Not saved", "Too many recurring items."); return; }
+    item.start = (pim_date_t){(uint16_t)year, (uint8_t)month, (uint8_t)day};
+    item.minutes = (uint16_t)(hour * 60 + minute);
+    item.freq = "DWMY"[lv_dropdown_get_selected(ui.choice)];
+    snprintf(item.title, sizeof(item.title), "%s", title);
+    recur[recur_count++] = item;
+    if (!pim_recur_save(PIM_ROOT, recur, recur_count)) { recur_count--; message("Not saved", "Check that the SD card is available."); return; }
+    recur_screen(NULL);
+}
+static void recur_add(lv_event_t *event) {
+    char date[16];
+    lv_obj_t *first; (void)event; clear(); label("New recurring item", 90, 4);
+    first = ui.title = text("Title", 12, 24, 296, 30, true);
+    format_date(date, sizeof(date), current_today());
+    label("Start date", 12, 62); label("Time", 168, 62);
+    recur_date = text("DD-MM-YYYY", 12, 80, 140, 30, true); lv_textarea_set_text(recur_date, date);
+    recur_time = text("HH:MM", 168, 80, 140, 30, true); lv_textarea_set_text(recur_time, "09:00");
+    ui.choice = lv_dropdown_create(lv_screen_active());
+    lv_dropdown_set_options(ui.choice, "Daily\nWeekly\nMonthly\nYearly"); crt_dropdown(ui.choice);
+    lv_obj_set_pos(ui.choice, 12, 124); lv_obj_set_size(ui.choice, 140, 32);
+    button("Save", 12, 176, 100, recur_save_form, NULL); button("Cancel", 190, 176, 100, recur_screen, NULL);
+    focus(first);
+}
+
+/* Backup and restore of everything under /PIM except derived exports */
+static char backup_names[PIM_BACKUP_KEEP + 1][PIM_BACKUP_NAME];
+static char backup_pick[PIM_BACKUP_NAME];
+static void theme_load(void);
+static void backup_create(lv_event_t *event) {
+    char name[PIM_BACKUP_NAME];
+    pim_date_t today = current_today();
+    bool ok;
+    (void)event;
+    snprintf(name, sizeof(name), "%04u-%02u-%02u_%02u%02u", today.year, today.month, today.day, current_minutes() / 60, current_minutes() % 60);
+    busy("Backup", "Copying data...");
+    pim_system_busy(true);
+    ok = pim_backup_create(PIM_ROOT, name);
+    pim_system_busy(false);
+    backup_screen(NULL);
+    message(ok ? "Backup done" : "Backup failed", ok ? name : "Check that the SD card has free space.");
+}
+static void backup_restore(lv_event_t *event) {
+    bool ok;
+    (void)event;
+    busy("Restore", "Copying data...");
+    pim_system_busy(true);
+    ok = pim_backup_restore(PIM_ROOT, backup_pick);
+    pim_system_busy(false);
+    if (ok && ui.storage_path != NULL) {
+        pim_storage_load(ui.storage_path, ui.database);
+        sound_load(); theme_load(); recur_reload();
+    }
+    backup_screen(NULL);
+    message(ok ? "Restored" : "Restore failed", ok ? "Data restored. Restart to apply Wi-Fi settings." : "The backup could not be read.");
+}
+static void backup_pick_item(lv_event_t *event) {
+    char body[160];
+    lv_obj_t *first;
+    size_t index = index_from_event(event);
+    if (index > PIM_BACKUP_KEEP) return;
+    snprintf(backup_pick, sizeof(backup_pick), "%s", backup_names[index]);
+    clear(); label("Restore backup?", 100, 24);
+    snprintf(body, sizeof(body), "%s\n\nThis replaces your current\nappointments, to-dos, notes,\njournal and settings.", backup_pick);
+    label(body, 12, 60);
+    first = button("Cancel", 20, 200, 120, backup_screen, NULL);
+    button("Restore", 170, 200, 120, backup_restore, NULL);
+    focus(first);
+}
+static void backup_screen(lv_event_t *event) {
+    lv_obj_t *list, *first;
+    size_t count;
+    (void)event; clear(); label("Backup", 130, 4);
+    first = button("Create backup", 8, 24, 190, backup_create, NULL); button("Back", 212, 24, 100, tools_screen, NULL);
+    label("Newest 5 are kept. Select one to restore.", 8, 58);
+    list = lv_list_create(lv_screen_active()); lv_obj_set_pos(list, 8, 80); lv_obj_set_size(list, 304, 220); crt_style(list, true);
+    count = pim_backup_list(PIM_ROOT, backup_names, PIM_BACKUP_KEEP + 1);
+    if (count == 0) label("No backups yet.", 16, 90);
+    for (size_t i = 0; i < count; i++) {
+        lv_obj_t *item = lv_list_add_button(list, NULL, backup_names[i]);
+        lv_obj_add_event_cb(item, backup_pick_item, LV_EVENT_CLICKED, (void *)(uintptr_t)(i + 1)); style_list_item(item);
     }
     focus(first);
 }
@@ -1142,6 +1575,11 @@ static void wifi_zone(lv_event_t *event) {
     label("Used by NTP time sync", 76, 220);
     focus(first);
 }
+static void wifi_off(lv_event_t *event) {
+    (void)event;
+    pim_wifi_off();
+    wifi(NULL);
+}
 static void wifi(lv_event_t *event) {
     char status[48], zone[24];
     lv_obj_t *first;
@@ -1159,11 +1597,12 @@ static void wifi(lv_event_t *event) {
     button("Time zone", 10, 116, 145, wifi_zone, (void *)NULL);
     button("Forget saved", 165, 116, 145, wifi_saved, (void *)(intptr_t)1);
     button("Web address", 10, 148, 145, wifi_info, NULL);
-    button("Back", 165, 148, 145, home, NULL);
-    label("Once connected, open the web", 36, 200);
-    label("address from a phone or PC.", 44, 218);
-    label("PIN shown there. HTTP only,", 40, 242);
-    label("so use a trusted network.", 52, 260);
+    button("Wi-Fi off", 165, 148, 145, wifi_off, NULL);
+    button("Back", 10, 180, 145, home, NULL);
+    label("Once connected, open the web", 36, 220);
+    label("address from a phone or PC.", 44, 238);
+    label("PIN shown there. HTTP only,", 40, 262);
+    label("so use a trusted network.", 52, 280);
     focus(first);
 }
 
@@ -1341,12 +1780,50 @@ static void gnumber(const char *label_text, unsigned value, int x, int y, int w)
     snprintf(text, sizeof(text), "%u", value);
     gtext(text, x, y + 14, w, LV_TEXT_ALIGN_LEFT, G_AMBER, font_big);
 }
-static void gover(const char *title, const char *line, int cx, int cy) {
+static bool score_saved;
+static unsigned score_rank;
+static void gover(const char *title, const char *line, int cx, int cy, const char *game, uint32_t score) {
+    char best[24];
+    if (!score_saved) { score_saved = true; score_rank = pim_scores_add(game, score); }
     gbox(cx - 100, cy - 36, 200, 72, G_BLACK, 2, G_AMBER);
     gtext(title, cx - 100, cy - 28, 200, LV_TEXT_ALIGN_CENTER, G_AMBER, font_big);
-    gtext(line, cx - 100, cy + 8, 200, LV_TEXT_ALIGN_CENTER, G_DIM, font_mid);
+    if (score_rank > 0) snprintf(best, sizeof(best), "BEST #%u", score_rank);
+    else snprintf(best, sizeof(best), "ENTER to restart");
+    gtext(score_rank > 0 ? best : line, cx - 100, cy + 8, 200, LV_TEXT_ALIGN_CENTER, G_DIM, font_mid);
 }
-static void game_redraw(void) { if (ui.board != NULL) lv_obj_invalidate(ui.board); }
+static void game_sounds(void) {
+    static uint16_t lines, score, level, gold, kills, floor, moves;
+    static uint8_t health, lives;
+    static bool over, won, fired;
+    uint16_t now_lines = 0, now_score = 0, now_level = 0, now_gold = 0, now_kills = 0, now_floor = 0, now_moves = 0;
+    uint8_t now_health = 0, now_lives = 0;
+    bool now_over = false, now_won = false, now_fired = false;
+    if (ui.game == GAME_TETRIS) { now_over = ui.tetris.game_over; now_lines = ui.tetris.lines; now_level = ui.tetris.level; }
+    else if (ui.game == GAME_INVADERS) {
+        now_over = ui.invaders.game_over; now_score = ui.invaders.score; now_lives = ui.invaders.lives;
+        now_level = ui.invaders.wave; now_fired = ui.invaders.bullet_active;
+    } else if (ui.game == GAME_DUNGEON) {
+        now_over = ui.dungeon.game_over; now_won = ui.dungeon.won; now_gold = ui.dungeon.gold; now_kills = ui.dungeon.kills;
+        now_floor = ui.dungeon.floor; now_health = ui.dungeon.health;
+    } else if (ui.game == GAME_SOLITAIRE) { now_won = ui.solitaire.won; now_moves = ui.solitaire.moves; }
+    if (now_over && !over) pim_sound_play(PIM_SOUND_GAME_OVER);
+    else if (now_won && !won) pim_sound_play(PIM_SOUND_WIN);
+    else if (now_level > level && level > 0) pim_sound_play(PIM_SOUND_LEVEL_UP);
+    else if (now_floor > floor && floor > 0) pim_sound_play(PIM_SOUND_LEVEL_UP);
+    else if (now_lines > lines) pim_sound_play(PIM_SOUND_CLEAR);
+    else if (now_lives < lives || (now_health < health && health > 0)) pim_sound_play(PIM_SOUND_HURT);
+    else if (now_score > score || now_kills > kills) pim_sound_play(PIM_SOUND_HIT);
+    else if (now_gold > gold || (now_health > health && health > 0)) pim_sound_play(PIM_SOUND_PICKUP);
+    else if (now_fired && !fired) pim_sound_play(PIM_SOUND_SHOOT);
+    else if (now_moves != moves) pim_sound_play(PIM_SOUND_MOVE);
+    over = now_over; won = now_won; lines = now_lines; score = now_score; level = now_level; gold = now_gold;
+    kills = now_kills; floor = now_floor; moves = now_moves; health = now_health; lives = now_lives; fired = now_fired;
+}
+static void game_redraw(void) {
+    bool ended = ui.game == GAME_TETRIS ? ui.tetris.game_over : ui.game == GAME_INVADERS ? ui.invaders.game_over :
+                 ui.game == GAME_DUNGEON ? ui.dungeon.game_over || ui.dungeon.won : ui.game == GAME_SOLITAIRE ? ui.solitaire.won : false;
+    if (!ended) { score_saved = false; score_rank = 0; }
+    game_sounds(); if (ui.board != NULL) lv_obj_invalidate(ui.board); }
 
 /* Tetris: 150x300 well with a ghost piece, next-piece preview and score panel. */
 #define T_CELL 15
@@ -1406,7 +1883,7 @@ static void draw_tetris(void) {
     gtext("< > move   ^ turn", 178, 270, 140, LV_TEXT_ALIGN_LEFT, G_DIM, font_small);
     gtext("v soft  ENTER drop", 178, 284, 140, LV_TEXT_ALIGN_LEFT, G_DIM, font_small);
     gtext("ESC quit", 178, 298, 140, LV_TEXT_ALIGN_LEFT, G_DIM, font_small);
-    if (ui.tetris.game_over) gover("GAME OVER", "ENTER to play again", T_X + 75, 150);
+    if (ui.tetris.game_over) gover("GAME OVER", "ENTER to play again", T_X + 75, 150, "tetris", ui.tetris.score);
     snprintf(game_status, sizeof(game_status), "Tetris score %u lines %u level %u%s", ui.tetris.score, ui.tetris.lines,
              ui.tetris.level, ui.tetris.game_over ? " GAME OVER" : "");
 }
@@ -1442,15 +1919,15 @@ static void draw_dungeon(void) {
     gfill(33, 253, d->max_health ? d->health * 124 / d->max_health : 0, 10, G_AMBER);
     snprintf(text, sizeof(text), "%u/%u", d->health, d->max_health);
     gtext(text, 168, 250, 60, LV_TEXT_ALIGN_LEFT, G_AMBER, font_mid);
-    snprintf(text, sizeof(text), "FLOOR %u/%u", d->floor, PIM_DUNGEON_FLOORS);
+    snprintf(text, sizeof(text), "FLOOR %u/%u", d->floor, d->floors);
     gtext(text, 232, 250, 84, LV_TEXT_ALIGN_LEFT, G_AMBER, font_mid);
     snprintf(text, sizeof(text), "GOLD %u   KILLS %u   FOES %u", d->gold, d->kills, d->enemies);
     gtext(text, 8, 272, 304, LV_TEXT_ALIGN_LEFT, G_AMBER, font_mid);
     gtext(d->message, 8, 292, 150, LV_TEXT_ALIGN_LEFT, G_AMBER, font_mid);
     gtext("Move into foes to fight", 150, 281, 166, LV_TEXT_ALIGN_RIGHT, G_DIM, font_small);
     gtext("ESC quit", 150, 297, 166, LV_TEXT_ALIGN_RIGHT, G_DIM, font_small);
-    if (d->game_over) gover("YOU DIED", "ENTER to try again", 160, 120);
-    if (d->won) gover("YOU ESCAPED!", "ENTER to play again", 160, 120);
+    if (d->game_over) gover("YOU DIED", "ENTER to try again", 160, 120, "dungeon", d->gold + d->kills * 10U);
+    if (d->won) gover("YOU ESCAPED!", "ENTER to play again", 160, 120, "dungeon", d->gold + d->kills * 10U);
     snprintf(game_status, sizeof(game_status), "Dungeon floor %u HP %u gold %u%s%s", d->floor, d->health, d->gold,
              d->game_over ? " DEFEATED" : "", d->won ? " VICTORY" : "");
 }
@@ -1491,7 +1968,7 @@ static void draw_invaders(void) {
     snprintf(text, sizeof(text), "WAVE %u", g->wave);
     gtext(text, 232, 262, 84, LV_TEXT_ALIGN_LEFT, G_AMBER, font_mid);
     gtext("< > move  ENTER fire  ESC quit", 8, 301, 304, LV_TEXT_ALIGN_LEFT, G_DIM, font_small);
-    if (g->game_over) gover("GAME OVER", "ENTER to play again", 160, 120);
+    if (g->game_over) gover("GAME OVER", "ENTER to play again", 160, 120, "invaders", g->score);
     snprintf(game_status, sizeof(game_status), "Invaders score %u lives %u wave %u%s", g->score, g->lives, g->wave,
              g->game_over ? " GAME OVER" : "");
 }
@@ -1574,7 +2051,7 @@ static void draw_solitaire(void) {
     gtext(text, 4, 304, 240, LV_TEXT_ALIGN_LEFT, ui.sol_message[0] ? G_AMBER : G_DIM, font_small);
     snprintf(text, sizeof(text), "Moves %u", g->moves);
     gtext(text, 250, 304, 66, LV_TEXT_ALIGN_RIGHT, G_DIM, font_small);
-    if (g->won) gover("YOU WIN!", "ENTER for a new deal", 160, 160);
+    if (g->won) gover("YOU WIN!", "ENTER for a new deal", 160, 160, "solitaire", g->moves < 10000 ? 10000U - g->moves : 0U);
     snprintf(game_status, sizeof(game_status), "Solitaire moves %u stock %u waste %u%s", g->moves, g->stock_count, g->waste_count,
              g->won ? " WON" : "");
 }
@@ -1934,6 +2411,37 @@ static void startup_screen(void) {
     date_refresh(); focus(ui.fld_obj[0]);
 }
 
+/* At boot: if a saved network is in range, join it, sync the clock and skip the set-time screen. */
+static bool auto_start(void) {
+    static pim_wifi_ap_t found[16];
+    char address[16];
+    uint32_t seconds;
+    pim_date_t date;
+    uint16_t minutes;
+    int count, best = -1, best_rssi = -1000;
+    if (ui.storage_path == NULL) return false;
+    wifi_cfg_load();
+    if (wifi_cfg.count == 0) return false;
+    pim_system_busy(true);
+    busy("Looking for Wi-Fi...", "Press nothing, please wait");
+    count = pim_wifi_scan(found, 16);
+    for (int i = 0; i < count; i++)
+        for (size_t n = 0; n < wifi_cfg.count; n++)
+            if (strcmp(found[i].ssid, wifi_cfg.networks[n].ssid) == 0 && found[i].rssi > best_rssi) { best = (int)n; best_rssi = found[i].rssi; }
+    if (best >= 0) {
+        busy("Connecting...", wifi_cfg.networks[best].ssid);
+        pim_wifi_set_progress(wifi_progress);
+        if (pim_wifi_connect(wifi_cfg.networks[best].ssid, wifi_cfg.networks[best].password, address, sizeof(address)) &&
+            pim_wifi_ntp(&seconds) && pim_time_from_unix(seconds, wifi_cfg.tz_minutes, &date, &minutes)) {
+            apply_clock(date, minutes);
+            pim_system_busy(false);
+            return true;
+        }
+    }
+    pim_system_busy(false);
+    return false;
+}
+
 static pim_date_t web_today(uint16_t *minutes) {
     *minutes = current_minutes();
     return current_today();
@@ -1948,9 +2456,12 @@ void pim_ui_start(pim_database_t *database, const char *storage_path) {
     wifi_cfg_ready = false;
     telnet_host[0] = '\0';
     theme_load();
+    sound_load();
     today_load();
     ui.calendar = ui.today;
     ui.base_ms = to_ms_since_boot(get_absolute_time());
     pim_wifi_attach(database, storage_path, PIM_ROOT, &hooks);
-    startup_screen();
+    if (storage_path != NULL) { pim_games_set_root(PIM_ROOT); pim_games_prepare(PIM_ROOT); }
+    recur_reload();
+    if (auto_start()) home(NULL); else startup_screen();
 }

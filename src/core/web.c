@@ -10,6 +10,7 @@
 
 #include "pim/net.h"
 #include "pim/storage.h"
+#include "pim/textfile.h"
 
 #ifdef PIM_VFS_DIRENT
 #include <sys/dirent.h>
@@ -144,7 +145,7 @@ static void format_date(char *out, size_t size, pim_date_t date) {
 
 static bool name_ok(const char *name) {
     size_t length = strlen(name);
-    static const char *const reserved[] = {"pim.dat", "wifi.cfg", "theme.cfg", "today.cfg"};
+    static const char *const reserved[] = {"pim.dat", "wifi.cfg", "theme.cfg", "today.cfg", "sound.cfg", "recurring.cfg"};
     if (length == 0 || length > 47 || strcmp(name, ".") == 0 || strcmp(name, "..") == 0) return false;
     for (size_t i = 0; i < length; i++)
         if (!isalnum((unsigned char)name[i]) && name[i] != '.' && name[i] != '_' && name[i] != '-') return false;
@@ -173,7 +174,9 @@ static void page_login(page_t *page, pim_web_response_t *response, bool locked) 
 
 static void page_home(pim_web_t *web, page_t *page, pim_web_response_t *response) {
     char date[16];
-    size_t open = 0, indices[PIM_MAX_APPOINTMENTS], count;
+    size_t open = 0, indices[PIM_MAX_APPOINTMENTS], count, journal_total = 0;
+    pim_date_t newest[1];
+    pim_journal_list(web->root, newest, 1, &journal_total);
     for (size_t i = 0; i < web->database->todo_count; i++) if (!web->database->todos[i].completed) open++;
     format_date(date, sizeof(date), web->today);
     page_begin(page, "PicoCalc PIM");
@@ -188,7 +191,7 @@ static void page_home(pim_web_t *web, page_t *page, pim_web_response_t *response
     }
     putf(page, "</ul><p>%u open to-dos, %u notes, %u journal entries.</p>"
                "<p><a href=/calendar.ics>Export calendar (.ics)</a></p>",
-         (unsigned)open, (unsigned)web->database->note_count, (unsigned)web->database->journal_count);
+         (unsigned)open, (unsigned)web->database->note_count, (unsigned)journal_total);
     finish_page(page, response);
 }
 
@@ -355,56 +358,66 @@ static void do_note(pim_web_t *web, const char *path, const char *body, pim_web_
     redirect(response, "/notes");
 }
 
+static size_t read_file(const char *path, char *buffer, size_t size, bool *too_big);
+
 static void page_journal(pim_web_t *web, page_t *page, pim_web_response_t *response) {
     char date[16];
+    pim_date_t dates[60];
+    size_t total = 0, count = pim_journal_list(web->root, dates, 60, &total);
     format_date(date, sizeof(date), web->today);
     page_begin(page, "Journal");
     putf(page, "<p><a href='/journal/edit?date=%s'>+ Today's entry (%s)</a></p><ul>", date, date);
-    for (size_t i = 0; i < web->database->journal_count; i++) {
-        const pim_journal_entry_t *entry = &web->database->journal[i];
-        format_date(date, sizeof(date), entry->date);
-        putf(page, "<li><a href='/journal/edit?date=%s'>%s</a> (%s)</li>", date, date, pim_mood_name(entry->mood));
+    for (size_t i = 0; i < count; i++) {
+        format_date(date, sizeof(date), dates[i]);
+        putf(page, "<li><a href='/journal/edit?date=%s'>%s</a></li>", date, date);
     }
-    if (web->database->journal_count == 0) put(page, "<li>No entries.</li>");
+    if (count == 0) put(page, "<li>No entries.</li>");
     put(page, "</ul>");
+    if (total > count) putf(page, "<p>%u older entries are on the SD card.</p>", (unsigned)(total - count));
     finish_page(page, response);
 }
 
-static void page_journal_edit(pim_web_t *web, page_t *page, pim_web_response_t *response, const char *query) {
-    char text[24];
+static char journal_text[PIM_WEB_EDIT_MAX + 1];
+
+static void page_journal_edit(pim_web_t *web, page_t *page, pim_web_response_t *response, const char *query, char *out, size_t out_size) {
+    char text[24], path[160];
     pim_date_t date = web->today;
-    const pim_journal_entry_t *entry = NULL;
+    size_t length = 0;
+    bool too_big = false, exists;
     if (param_get(query, "date", text, sizeof(text))) parse_date(text, &date);
     format_date(text, sizeof(text), date);
-    for (size_t i = 0; i < web->database->journal_count; i++)
-        if (pim_date_compare(web->database->journal[i].date, date) == 0) entry = &web->database->journal[i];
+    exists = pim_journal_exists(web->root, date);
+    if (exists && pim_journal_path(web->root, date, path, sizeof(path))) length = read_file(path, journal_text, PIM_WEB_EDIT_MAX, &too_big);
+    if (too_big) { fail(response, out, out_size, 413, "This entry is too large to edit in the browser; edit it on the device"); return; }
+    journal_text[length] = '\0';
     page_begin(page, "Journal entry");
-    putf(page, "<form method=post action=/journal/save><input type=hidden name=date value=%s><b>%s</b> Mood <select name=mood>", text, text);
-    for (int mood = PIM_MOOD_GREAT; mood <= PIM_MOOD_TERRIBLE; mood++)
-        putf(page, "<option value=%d%s>%s</option>", mood, entry != NULL && (int)entry->mood == mood ? " selected" : "", pim_mood_name((pim_mood_t)mood));
-    put(page, "</select><br><textarea name=content rows=14 maxlength=383>");
-    if (entry != NULL) put_escaped(page, entry->content);
+    putf(page, "<form method=post action=/journal/save><input type=hidden name=date value=%s><b>%s</b><br>"
+               "<textarea name=content rows=18>", text, text);
+    put_escaped(page, journal_text);
     put(page, "</textarea><br><button>Save</button></form>");
-    if (entry != NULL)
+    if (exists)
         putf(page, " <form method=post action=/journal/delete><input type=hidden name=date value=%s><button>Delete</button></form>", text);
     finish_page(page, response);
 }
 
 static void do_journal(pim_web_t *web, const char *path, const char *body, pim_web_response_t *response, char *out, size_t out_size) {
-    char text[24];
-    pim_journal_entry_t entry;
-    memset(&entry, 0, sizeof(entry));
+    char text[24], file_path[160], folder[160];
+    pim_date_t date;
+    uint32_t size = 0;
     param_get(body, "date", text, sizeof(text));
-    if (!parse_date(text, &entry.date)) { fail(response, out, out_size, 400, "Invalid date"); return; }
+    if (!parse_date(text, &date) || !pim_journal_path(web->root, date, file_path, sizeof(file_path))) { fail(response, out, out_size, 400, "Invalid date"); return; }
     if (strcmp(path, "/journal/delete") == 0) {
-        for (size_t i = 0; i < web->database->journal_count; i++)
-            if (pim_date_compare(web->database->journal[i].date, entry.date) == 0) { pim_delete_journal(web->database, i); commit(web); break; }
+        pim_journal_delete(web->root, date);
     } else {
-        param_get(body, "mood", text, sizeof(text));
-        entry.mood = (pim_mood_t)atoi(text);
-        param_get(body, "content", entry.content, sizeof(entry.content));
-        if (!pim_add_or_update_journal(web->database, &entry)) { fail(response, out, out_size, 400, "Could not save (full, empty text or bad mood)"); return; }
-        commit(web);
+        param_get(body, "content", journal_text, sizeof(journal_text));
+        if (pim_text_size(file_path, &size) && size > PIM_WEB_EDIT_MAX) { fail(response, out, out_size, 413, "This entry is too large to save from the browser"); return; }
+        if (journal_text[0] == '\0') pim_journal_delete(web->root, date);
+        else {
+            snprintf(folder, sizeof(folder), "%s/journal", web->root);
+            mkdir(folder, 0777);
+            if (!pim_text_replace(file_path, 0, size, journal_text, strlen(journal_text))) { fail(response, out, out_size, 500, "Could not write the entry"); return; }
+        }
+        web->changed = true;
     }
     redirect(response, "/journal");
 }
@@ -444,7 +457,8 @@ static size_t read_file(const char *path, char *buffer, size_t size, bool *too_b
 }
 
 static void page_edit(pim_web_t *web, page_t *page, pim_web_response_t *response, const char *query, char *out, size_t out_size) {
-    char name[64], path[160], text[PIM_WEB_EDIT_MAX + 1];
+    char name[64], path[160];
+    static char text[PIM_WEB_EDIT_MAX + 1];
     size_t length;
     bool too_big;
     param_get(query, "name", name, sizeof(name));
@@ -559,7 +573,7 @@ void pim_web_handle(pim_web_t *web, const char *method, const char *target, cons
     else if (get && strcmp(path, "/note") == 0) page_note(web, &page, response, query);
     else if (post && (strcmp(path, "/note/save") == 0 || strcmp(path, "/note/delete") == 0)) do_note(web, path, body, response, out, out_size);
     else if (get && strcmp(path, "/journal") == 0) page_journal(web, &page, response);
-    else if (get && strcmp(path, "/journal/edit") == 0) page_journal_edit(web, &page, response, query);
+    else if (get && strcmp(path, "/journal/edit") == 0) page_journal_edit(web, &page, response, query, out, out_size);
     else if (post && (strcmp(path, "/journal/save") == 0 || strcmp(path, "/journal/delete") == 0)) do_journal(web, path, body, response, out, out_size);
     else if (get && strcmp(path, "/files") == 0) page_files(web, &page, response);
     else if (get && strcmp(path, "/edit") == 0) page_edit(web, &page, response, query, out, out_size);

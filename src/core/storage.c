@@ -1,6 +1,7 @@
 #include "pim/storage.h"
 
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 #define PIM_STORAGE_MAGIC 0x50494D31U
@@ -22,18 +23,25 @@ static uint32_t checksum(const void *data, size_t length) {
 
 bool pim_storage_load(const char *path, pim_database_t *database) {
     header_t header;
-    pim_database_t loaded;
+    pim_database_t *loaded = malloc(sizeof(*loaded));
     FILE *file = fopen(path, "rb");
-    if (file == NULL) { pim_database_init(database); return false; }
+    if (loaded == NULL || file == NULL) {
+        if (file != NULL) fclose(file);
+        free(loaded);
+        pim_database_init(database);
+        return false;
+    }
     if (fread(&header, sizeof(header), 1, file) != 1 || header.magic != PIM_STORAGE_MAGIC ||
-        header.size != sizeof(loaded) || fread(&loaded, sizeof(loaded), 1, file) != 1 ||
-        fgetc(file) != EOF || header.crc != checksum(&loaded, sizeof(loaded))) {
+        header.size != sizeof(*loaded) || fread(loaded, sizeof(*loaded), 1, file) != 1 ||
+        fgetc(file) != EOF || header.crc != checksum(loaded, sizeof(*loaded))) {
         fclose(file);
+        free(loaded);
         pim_database_init(database);
         return false;
     }
     fclose(file);
-    *database = loaded;
+    *database = *loaded;
+    free(loaded);
     return true;
 }
 

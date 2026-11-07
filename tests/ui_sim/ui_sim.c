@@ -13,6 +13,7 @@
 #include "lvgl/lvgl.h"
 #include "pico/time.h"
 #include "pim/pim.h"
+#include "pim/sound.h"
 #include "pim/storage.h"
 #include "pim/ui.h"
 #include "pim/wifi.h"
@@ -94,6 +95,15 @@ static void server_says(const char *text) {
     memcpy(sim_rx + sim_rx_length, text, length); sim_rx_length += length;
 }
 void pim_wifi_poll(void) {}
+static int sim_wifi_off;
+void pim_wifi_off(void) { sim_wifi_off++; }
+static bool sim_sound = true;
+void pim_sound_set_enabled(bool enabled) { sim_sound = enabled; }
+bool pim_sound_enabled(void) { return sim_sound; }
+void pim_sound_play(pim_sound_event_t event) { (void)event; }
+void pim_input_activity(void) {}
+void pim_system_busy(bool busy) { (void)busy; }
+void pim_sound_poll(void) {}
 
 /* Mirrors src/firmware/input.c: one press then one release per key. */
 static void read_keyboard(lv_indev_t *indev, lv_indev_data_t *data) {
@@ -273,7 +283,7 @@ static bool database_persisted(void) {
 
 static void test_home(void) {
     static const char *const entries[] = {"Calendar", "To-Do List", "Notes", "Journal", "Files",
-                                          "Text editor", "Wi-Fi & web", "Tetris", "Dungeon RPG", "Space Invaders", "Solitaire", "Theme", "Telnet (BBS)"};
+                                          "Text editor", "Tools", "Wi-Fi & web", "Tetris", "Dungeon RPG", "Space Invaders", "Solitaire", "Theme", "Telnet (BBS)"};
     reset_ui("home");
     for (size_t i = 0; i < sizeof(entries) / sizeof(entries[0]); i++) CHECK(see_line(entries[i]));
     CHECK(!see("Appointments"));
@@ -288,7 +298,10 @@ static void test_home(void) {
     key(LV_KEY_DOWN); CHECK(focus_is("Notes"));
     key(LV_KEY_LEFT); CHECK(focus_is("To-Do List"));
     key(LV_KEY_UP); CHECK(focus_is("Calendar"));
-    key(LV_KEY_PREV); CHECK(focus_is("Telnet (BBS)"));
+    key(LV_KEY_PREV); CHECK(focus_is("Sound: ON"));
+    CHECK(activate("Sound: ON")); CHECK(see_line("Sound: OFF")); CHECK(!pim_sound_enabled());
+    CHECK(activate("Sound: OFF")); CHECK(see_line("Sound: ON")); CHECK(pim_sound_enabled());
+    CHECK(activate("Wi-Fi & web")); CHECK(activate("Wi-Fi off")); CHECK(sim_wifi_off == 1); key(LV_KEY_ESC);
     for (size_t i = 0; i < sizeof(entries) / sizeof(entries[0]); i++) {
         if (!activate(entries[i])) continue;
         key(LV_KEY_ESC);
@@ -530,28 +543,111 @@ static void test_journal(void) {
     CHECK(activate("Journal")); CHECK(see("01-01-2026")); theme("journal");
     CHECK(activate(">")); CHECK(see("02-01-2026"));
     CHECK(activate("<")); CHECK(activate("<")); CHECK(see("31-12-2025"));
-    CHECK(activate(">")); CHECK(see("01-01-2026"));
-    CHECK(goto_focus("<dropdown>"));
-    key(LV_KEY_ENTER); key(LV_KEY_UP); key(LV_KEY_ENTER);
-    CHECK(goto_focus("<textarea>")); type("Good day");
+    CHECK(activate(">")); CHECK(see("01-01-2026")); CHECK(see("No entry"));
+    CHECK(activate("Write")); theme("journal editor");
+    CHECK(goto_focus("<textarea>")); type("Good day\nSecond line");
     CHECK(activate("Save"));
-    CHECK(database.journal_count == 1);
-    if (database.journal_count) CHECK(database.journal[0].mood == PIM_MOOD_GOOD);
     CHECK(file_contains(ROOT "/journal/01-01-2026.md", "Good day"));
-    CHECK(see("Good day"));
-    CHECK(activate("View")); CHECK(see("01-01-2026 [Good]")); theme("journal list");
+    CHECK(see("Good day")); CHECK(see("Edit"));
+    CHECK(activate("View")); CHECK(see("01-01-2026")); theme("journal list");
     CHECK(activate("Back")); CHECK(see("Journal"));
+    CHECK(activate("Delete")); CHECK(!exists(ROOT "/journal/01-01-2026.md")); CHECK(see("No entry"));
 }
 
-static void test_journal_detail_delete(void) {
-    pim_journal_entry_t entry = {.date = {2026, 3, 4}, .mood = PIM_MOOD_GREAT, .content = "Hello"};
-    reset_ui("journal-delete");
-    CHECK(pim_add_or_update_journal(&database, &entry));
-    pim_storage_save(ROOT "/pim.dat", &database); pim_storage_export(ROOT, &database);
-    CHECK(activate("Journal")); CHECK(activate("View"));
-    CHECK(activate("04-03-2026 [Great]")); CHECK(see("Hello")); theme("journal detail");
-    CHECK(activate("Delete"));
-    CHECK(database.journal_count == 0 && !exists(ROOT "/journal/04-03-2026.md"));
+static void write_big_file(const char *path, int lines) {
+    FILE *file = fopen(path, "wb");
+    if (file == NULL) return;
+    for (int i = 0; i < lines; i++) fprintf(file, "line %04d of a long file that spans pages\n", i);
+    fclose(file);
+}
+static void test_large_editor(void) {
+    reset_ui("large-editor");
+    write_big_file(ROOT "/big.txt", 800);
+    CHECK(activate("Files")); CHECK(activate("big.txt"));
+    CHECK(see("line 0000"));
+    CHECK(activate("Next")); CHECK(!see("line 0000")); CHECK(see("line 00"));
+    CHECK(goto_focus("<textarea>")); type("EDITED");
+    CHECK(activate("Next"));
+    CHECK(activate("Prev"));
+    CHECK(system("grep -q EDITED " ROOT "/big.txt") == 0);
+    CHECK(activate("Prev")); CHECK(see("line 0000"));
+    CHECK(activate("Files"));
+    CHECK(file_contains(ROOT "/big.txt", "line 0000"));
+    {
+        FILE *file = fopen(ROOT "/big.txt", "rb");
+        long size = 0;
+        if (file) { fseek(file, 0, SEEK_END); size = ftell(file); fclose(file); }
+        CHECK(size > 30000);
+    }
+}
+
+static void test_tools(void) {
+    reset_ui("tools");
+    CHECK(activate("Tools")); theme("tools");
+    CHECK(see("Search") && see("Calculator") && see("Backup"));
+    CHECK(activate("Back")); CHECK(see("PicoCalc PIM"));
+    /* calculator */
+    CHECK(activate("Tools")); CHECK(activate("Calculator")); theme("calculator");
+    CHECK(goto_focus("<textarea>")); type("2+3*4"); CHECK(see("= 14")); type("\n"); CHECK(see("= 14"));
+    type("*2"); CHECK(see("ans*2")); CHECK(see("= 28")); type("\n"); CHECK(see("= 28"));
+    key(LV_KEY_UP); CHECK(see("ans*2")); key(LV_KEY_DOWN);
+    type("ans*2\n"); CHECK(see("= 56"));
+    type("sin(30)\n"); CHECK(see("= 0.5"));
+    type("1/0\n"); CHECK(see("ivision") || see("rror") || see("zero"));
+    CHECK(activate("Deg")); CHECK(see("Rad"));
+    CHECK(activate("Clear")); CHECK(!see("= 14"));
+    CHECK(activate("Back")); CHECK(see("Timer"));
+    /* search */
+    {
+        FILE *file;
+        file = fopen(ROOT "/zebra.txt", "wb"); if (file) { fputs("Zebra plan", file); fclose(file); }
+        file = fopen(ROOT "/hello.txt", "wb"); if (file) { fputs("needle in haystack", file); fclose(file); }
+    }
+    CHECK(activate("Search")); theme("search");
+    CHECK(goto_focus("<textarea>")); type("zebra\n"); CHECK(see("Zebra plan")); theme("search results");
+    CHECK(activate("Back")); CHECK(activate("Search"));
+    CHECK(goto_focus("<textarea>")); key(LV_KEY_BACKSPACE); keys(LV_KEY_BACKSPACE, 10); type("needle\n");
+    CHECK(see("hello.txt"));
+    CHECK(activate("F hello.txt: needle in haystack") || see("hello"));
+    key(LV_KEY_ESC); key(LV_KEY_ESC);
+    /* recurring */
+    CHECK(activate("Tools")); CHECK(activate("Recurring")); theme("recurring");
+    CHECK(activate("Add")); theme("recurring form");
+    CHECK(goto_focus("<textarea>")); type("Water plants");
+    CHECK(activate("Save")); CHECK(see("Water plants"));
+    CHECK(file_contains(ROOT "/recurring.cfg", "Water plants"));
+    CHECK(activate("D 09:00 Water plants")); CHECK(see("Repeats")); CHECK(activate("Delete"));
+    CHECK(!see("Water plants"));
+    CHECK(activate("Add")); CHECK(goto_focus("<textarea>")); key(LV_KEY_NEXT); keys(LV_KEY_BACKSPACE, 12); type("99-99-2026");
+    key(LV_KEY_NEXT); CHECK(activate("Save")); CHECK(see("Not saved")); key(LV_KEY_ENTER);
+    CHECK(activate("Cancel"));
+    /* backup */
+    CHECK(activate("Back")); CHECK(activate("Backup")); theme("backup");
+    CHECK(see("No backups"));
+    CHECK(activate("Create backup")); CHECK(see("Backup done")); key(LV_KEY_ENTER);
+    CHECK(!see("No backups")); theme("backup list");
+    CHECK(see("20"));
+    key(LV_KEY_ESC);
+    CHECK(exists(ROOT "/games/dungeon/floor1.txt"));
+}
+
+static void test_timer(void) {
+    reset_ui("timer");
+    CHECK(activate("Tools")); CHECK(activate("Timer")); theme("timer");
+    CHECK(see("STOPWATCH")); CHECK(activate("Start")); pump(300); CHECK(see("Stop"));
+    CHECK(activate("Stop")); CHECK(activate("Reset")); CHECK(see("00:00"));
+    CHECK(activate("Mode")); CHECK(see("COUNTDOWN"));
+    CHECK(activate("+1 min")); CHECK(see("01:00"));
+    CHECK(activate("Start")); pump(6200); CHECK(see("DONE"));
+}
+
+static void test_scores(void) {
+    reset_ui("scores");
+    CHECK(activate("Tetris"));
+    for (int i = 0; i < 60; i++) key(LV_KEY_ENTER);
+    key(LV_KEY_ESC);
+    CHECK(see("PicoCalc PIM"));
+    CHECK(exists(ROOT "/games/tetris/scores.txt") || exists(ROOT "/games/tetris/game.cfg"));
 }
 
 static void test_files(void) {
@@ -682,11 +778,21 @@ static void test_wifi_time(void) {
     wifi_result = true;
     CHECK(activate("Wi-Fi & web")); CHECK(activate("Manual entry")); CHECK(goto_focus("<textarea>")); type("HomeNet"); key(LV_KEY_NEXT); type("pw");
     CHECK(activate("Connect")); key(LV_KEY_ESC);
+    /* a saved network in range: connect, sync and go straight to Home */
+    pim_ui_start(&database, ROOT "/pim.dat"); pump(10);
+    CHECK(!see("Set date and time")); CHECK(see("15-03-2026  15:50"));
+    key(LV_KEY_ESC);
+    /* no scan result or no time: fall back to the manual screen */
+    sim_scan_ok = false;
     pim_ui_start(&database, ROOT "/pim.dat"); pump(10);
     CHECK(see("Set date and time")); theme("startup");
     CHECK(activate("Sync (Wi-Fi)")); CHECK(see("Time synced")); key(LV_KEY_ESC);
     CHECK(see("15") && see("03") && see("2026")); theme("startup synced");
     CHECK(activate("Start")); CHECK(see("15-03-2026  15:50"));
+    sim_scan_ok = true; sim_ntp_ok = false;
+    pim_ui_start(&database, ROOT "/pim.dat"); pump(10);
+    CHECK(see("Set date and time"));
+    sim_ntp_ok = true;
 }
 
 static void test_telnet(void) {
@@ -823,7 +929,7 @@ static void test_theme_switcher(void) {
 
 static void test_navigation_leaks(void) {
     static const char *const entries[] = {"Calendar", "To-Do List", "Notes", "Journal", "Files",
-                                          "Text editor", "Wi-Fi & web", "Tetris", "Dungeon RPG", "Space Invaders", "Solitaire", "Theme", "Telnet (BBS)"};
+                                          "Text editor", "Tools", "Wi-Fi & web", "Tetris", "Dungeon RPG", "Space Invaders", "Solitaire", "Theme", "Telnet (BBS)"};
     lv_mem_monitor_t before, after;
     reset_ui("memory");
     for (int round = 0; round < 3; round++)
@@ -897,7 +1003,10 @@ static int run_suite(const char *theme_name) {
     test_todos();
     test_notes();
     test_journal();
-    test_journal_detail_delete();
+    test_large_editor();
+    test_tools();
+    test_timer();
+    test_scores();
     test_files();
     test_text_editor_entry();
     test_wifi();

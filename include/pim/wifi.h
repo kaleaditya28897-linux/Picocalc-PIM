@@ -27,6 +27,8 @@ bool pim_wifi_ntp(uint32_t *unix_seconds);
 /* Login PIN for the web interface, regenerated on every connection. */
 const char *pim_wifi_pin(void);
 const char *pim_wifi_address(void);
+/* Disconnects and powers the radio off; also done automatically after 15 idle minutes. */
+void pim_wifi_off(void);
 void pim_wifi_poll(void);
 
 /* Telnet transport: raw bytes in and out; protocol and terminal handling live in the core. */

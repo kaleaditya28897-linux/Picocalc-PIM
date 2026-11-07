@@ -37,7 +37,7 @@ typedef struct {
     char cells[PIM_DUNGEON_HEIGHT][PIM_DUNGEON_WIDTH]; /* '#' wall, '.' floor, '>' stairs, '$' gold, '!' potion */
     pim_enemy_t enemy[PIM_DUNGEON_MAX_ENEMIES];
     int8_t player_x, player_y;
-    uint8_t health, max_health, gold, floor, enemies, kills;
+    uint8_t health, max_health, gold, floor, floors, enemies, kills;
     uint32_t rng;
     char message[32];
     bool game_over, won;

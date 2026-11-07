@@ -5,6 +5,7 @@
 #include <string.h>
 #include <strings.h>
 
+#include "hardware/watchdog.h"
 #include "lwip/dns.h"
 #include "lwip/ip4_addr.h"
 #include "lwip/netif.h"
@@ -33,6 +34,10 @@ typedef struct {
 
 static bool wifi_initialized;
 static bool wifi_up;
+static uint32_t wifi_activity_ms;
+#define WIFI_IDLE_OFF_MS (15U * 60U * 1000U)
+
+static void touch(void) { wifi_activity_ms = to_ms_since_boot(get_absolute_time()); }
 static char wifi_address[16];
 static struct tcp_pcb *listener;
 static struct tcp_pcb *client;
@@ -215,6 +220,7 @@ static err_t server_accept(void *arg, struct tcp_pcb *pcb, err_t error) {
         tcp_abort(pcb);
         return ERR_ABRT;
     }
+    touch();
     client = pcb;
     request_length = 0;
     reply.active = false;
@@ -265,6 +271,7 @@ static bool wifi_init(void) {
         }
         cyw43_arch_enable_sta_mode();
         wifi_initialized = true;
+        touch();
     }
     return true;
 }
@@ -292,7 +299,9 @@ bool pim_wifi_connect(const char *raw_ssid, const char *raw_password, char *addr
         static const char *const stages[] = {"Joining (mixed)", "Joining (AES)", "Joining (WPA3)"};
         progress(stages[i]);
         cyw43_wifi_leave(&cyw43_state, CYW43_ITF_STA);
+        watchdog_disable();
         joined = codes[i] = cyw43_arch_wifi_connect_timeout_ms(ssid, password, auth_modes[i], 15000);
+        watchdog_enable(8000, true);
     }
     if (joined != 0) {
         snprintf(wifi_error, sizeof(wifi_error), "Join failed: mixed %d, aes %d, wpa3 %d. ssid len %u, pw len %u, first %02x, last %02x/%02x",
@@ -313,6 +322,7 @@ bool pim_wifi_connect(const char *raw_ssid, const char *raw_password, char *addr
     snprintf(web.pin, sizeof(web.pin), "%04u", (unsigned)number);
     web.failures = 0;
     wifi_up = true;
+    touch();
     snprintf(wifi_address, sizeof(wifi_address), "%s", ip4addr_ntoa(netif_ip4_addr(netif_default)));
     snprintf(address, address_size, "%s", wifi_address);
     return true;
@@ -354,7 +364,7 @@ int pim_wifi_scan(pim_wifi_ap_t *list, int max) {
     if (cyw43_wifi_scan(&cyw43_state, &options, &scan, scan_result) != 0) return -1;
     while (cyw43_wifi_scan_active(&cyw43_state) && !time_reached(end)) {
         cyw43_arch_poll();
-        sleep_ms(1);
+        watchdog_update(); sleep_ms(1);
     }
     for (int i = 1; i < scan.count; i++)
         for (int j = i; j > 0 && list[j].rssi > list[j - 1].rssi; j--) {
@@ -392,7 +402,7 @@ static bool resolve(const char *host, ip_addr_t *address) {
     if (error != ERR_INPROGRESS) return false;
     while (!lookup.resolved && !lookup.failed && !time_reached(end)) {
         cyw43_arch_poll();
-        sleep_ms(1);
+        watchdog_update(); sleep_ms(1);
     }
     if (!lookup.resolved) return false;
     *address = lookup.address;
@@ -451,7 +461,7 @@ bool pim_wifi_ntp(uint32_t *unix_seconds) {
             pbuf_free(p);
             while (!state.received && !time_reached(end)) {
                 cyw43_arch_poll();
-                sleep_ms(1);
+                watchdog_update(); sleep_ms(1);
             }
             ok = state.received && pim_ntp_decode(state.packet, state.length, unix_seconds);
             state.received = false;
@@ -529,7 +539,7 @@ bool pim_telnet_open(const char *host, uint16_t port) {
     end = make_timeout_time_ms(15000);
     while (!state.done && telnet != NULL && !time_reached(end)) {
         cyw43_arch_poll();
-        sleep_ms(1);
+        watchdog_update(); sleep_ms(1);
     }
     if (telnet == NULL) return false;
     if (!state.done || state.result != ERR_OK) {
@@ -575,6 +585,21 @@ bool pim_telnet_write(const uint8_t *data, size_t length) {
     return tcp_output(telnet) == ERR_OK;
 }
 
+/* Powers the radio down; it is the largest battery draw once a network is joined. */
+void pim_wifi_off(void) {
+    if (!wifi_initialized) return;
+    pim_telnet_close();
+    if (client != NULL) finish_client(client);
+    if (listener != NULL) { tcp_close(listener); listener = NULL; }
+    cyw43_arch_deinit();
+    wifi_initialized = false;
+    wifi_up = false;
+    wifi_address[0] = '\0';
+}
+
 void pim_wifi_poll(void) {
-    if (wifi_initialized) cyw43_arch_poll();
+    if (!wifi_initialized) return;
+    cyw43_arch_poll();
+    if (telnet_open_flag) touch();
+    else if (client == NULL && to_ms_since_boot(get_absolute_time()) - wifi_activity_ms > WIFI_IDLE_OFF_MS) pim_wifi_off();
 }

@@ -1,8 +1,44 @@
 #include "pim/ui.h"
 #include "i2ckbd.h"
 #include "lvgl/lvgl.h"
+#include "pico/stdlib.h"
+#include "pim/sound.h"
+
+#define BACKLIGHT_REG 0x05
+#define DIM_AFTER_MS 30000U
+#define OFF_AFTER_MS 120000U
 
 static volatile bool game_mode;
+static uint8_t backlight_level = 0xff;
+static uint8_t backlight_now = 0xff;
+static uint32_t last_activity_ms;
+
+static bool backlight_read(uint8_t *value) {
+    uint8_t reg = BACKLIGHT_REG, reply[2];
+    if (i2c_write_timeout_us(I2C_KBD_MOD, I2C_KBD_ADDR, &reg, 1, false, 20000) != 1) return false;
+    sleep_ms(16);
+    if (i2c_read_timeout_us(I2C_KBD_MOD, I2C_KBD_ADDR, reply, 2, false, 20000) != 2) return false;
+    *value = reply[1];
+    return true;
+}
+static void backlight_set(uint8_t value) {
+    uint8_t command[2] = {BACKLIGHT_REG | 0x80, value};
+    if (value == backlight_now) return;
+    if (i2c_write_timeout_us(I2C_KBD_MOD, I2C_KBD_ADDR, command, 2, false, 20000) == 2) backlight_now = value;
+}
+
+void pim_input_activity(void) {
+    last_activity_ms = to_ms_since_boot(get_absolute_time());
+    if (backlight_level != 0xff) backlight_set(backlight_level);
+}
+
+/* Dims then blanks the LCD when idle, which is the biggest battery saver; keys restore it. */
+void pim_input_idle_poll(void) {
+    uint32_t idle = to_ms_since_boot(get_absolute_time()) - last_activity_ms;
+    if (game_mode || backlight_level == 0xff) return;
+    if (idle >= OFF_AFTER_MS) backlight_set(0);
+    else if (idle >= DIM_AFTER_MS) backlight_set(backlight_level / 5U ? backlight_level / 5U : 1U);
+}
 
 void pim_input_set_game_mode(bool enabled) { game_mode = enabled; }
 
@@ -37,6 +73,17 @@ static void read_keyboard(lv_indev_t *indev, lv_indev_data_t *data) {
         return;
     }
     key = read_i2c_kbd();
+    if (key > 0) {
+        bool asleep = backlight_level != 0xff && backlight_now != backlight_level;
+        last_activity_ms = to_ms_since_boot(get_absolute_time());
+        if (asleep) {
+            backlight_set(backlight_level);
+            data->key = 0;
+            data->state = LV_INDEV_STATE_RELEASED;
+            return;
+        }
+        pim_sound_play(PIM_SOUND_KEY);
+    }
     if (game_mode && key > 0) {
         /* Drop the keyboard FIFO backlog from held keys; the newest key wins. */
         for (int drained = 0; drained < 32; drained++) {
@@ -73,6 +120,9 @@ void pim_input_init(void) {
     lv_indev_t *indev;
     lv_group_t *group;
     init_i2c_kbd();
+    if (backlight_read(&backlight_level) && backlight_level != 0) backlight_now = backlight_level;
+    else backlight_level = 0xff;
+    last_activity_ms = to_ms_since_boot(get_absolute_time());
     indev = lv_indev_create();
     lv_indev_set_type(indev, LV_INDEV_TYPE_KEYPAD);
     lv_indev_set_read_cb(indev, read_keyboard);

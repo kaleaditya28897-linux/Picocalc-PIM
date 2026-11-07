@@ -1,6 +1,7 @@
 #include "pim/games.h"
 #include "pim/net.h"
 #include "pim/pim.h"
+#include "pim/sound.h"
 #include "pim/storage.h"
 #include "pim/telnet.h"
 #include "pim/web.h"
@@ -394,7 +395,7 @@ static void web_request(const char *method, const char *target, const char *body
 }
 static void test_web(void) {
     static pim_database_t database, reloaded;
-    char path[300];
+    char path[300], exported[512];
     pim_database_init(&database);
     mkdir("test_web_dir", 0777);
     web_state = (pim_web_t){.database = &database, .root = "test_web_dir", .storage_path = "test_web_dir/pim.dat",
@@ -448,12 +449,15 @@ static void test_web(void) {
     web_request("POST", "/note/delete", path, true); CHECK(database.note_count == 0);
     web_request("POST", "/note/save", "id=77&title=Ghost&content=x", true); CHECK(web_response.status == 400);
 
-    web_request("POST", "/journal/save", "date=14-01-2026&mood=1&content=Good+day", true);
-    CHECK(web_response.status == 303 && database.journal_count == 1 && database.journal[0].mood == PIM_MOOD_GOOD);
-    web_request("GET", "/journal/edit?date=14-01-2026", "", true); CHECK(strstr(web_out, "Good day") && strstr(web_out, "selected"));
+    mkdir("test_web_dir/journal", 0777);
+    web_request("POST", "/journal/save", "date=14-01-2026&content=Good+day%0D%0Asecond", true);
+    CHECK(web_response.status == 303 && read_text("test_web_dir/journal/14-01-2026.md", exported, sizeof(exported)) > 0 && strstr(exported, "Good day"));
+    web_request("GET", "/journal/edit?date=14-01-2026", "", true); CHECK(strstr(web_out, "Good day") && strstr(web_out, "Delete"));
     web_request("GET", "/journal", "", true); CHECK(strstr(web_out, "14-01-2026"));
-    web_request("POST", "/journal/save", "date=14-01-2026&mood=9&content=x", true); CHECK(web_response.status == 400);
-    web_request("POST", "/journal/delete", "date=14-01-2026", true); CHECK(database.journal_count == 0);
+    web_request("GET", "/", "", true); CHECK(strstr(web_out, "1 journal entries"));
+    web_request("POST", "/journal/save", "date=99-99-2026&content=x", true); CHECK(web_response.status == 400);
+    web_request("POST", "/journal/delete", "date=14-01-2026", true); CHECK(read_text("test_web_dir/journal/14-01-2026.md", exported, sizeof(exported)) == 0);
+    web_request("POST", "/journal/save", "date=14-01-2026&content=", true); CHECK(web_response.status == 303 && read_text("test_web_dir/journal/14-01-2026.md", exported, sizeof(exported)) == 0);
 
     web_request("POST", "/save", "name=hello.c&text=%23include+%3Cstdio.h%3E%0D%0Aint+main%28void%29+%7B%7D", true);
     CHECK(web_response.status == 303);
@@ -551,8 +555,15 @@ static void test_telnet(void) {
     CHECK(pim_term_encode('a', key) == 1 && key[0] == 'a');
 }
 
+static void test_sound(void) {
+    uint16_t hz, ms;
+    for (int event = 0; event < PIM_SOUND_COUNT; event++)
+        CHECK(pim_sound_tone((pim_sound_event_t)event, &hz, &ms) && hz >= 100 && hz <= 4000 && ms > 0 && ms <= 1000);
+    CHECK(!pim_sound_tone(PIM_SOUND_COUNT, &hz, &ms));
+}
+
 int main(void) {
-    test_calendar(); test_battery_decode(); test_net(); test_web(); test_telnet(); test_date_entry(); test_models_and_storage(); test_games();
+    test_calendar(); test_battery_decode(); test_net(); test_web(); test_telnet(); test_sound(); test_date_entry(); test_models_and_storage(); test_games();
     if (failures) { fprintf(stderr, "%d failures\n", failures); return 1; }
     puts("PIM core tests passed"); return 0;
 }
