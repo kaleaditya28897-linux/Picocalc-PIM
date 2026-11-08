@@ -31,7 +31,7 @@ static void put(page_t *page, const char *text) {
 }
 static void putf(page_t *page, const char *format, ...) __attribute__((format(printf, 2, 3)));
 static void putf(page_t *page, const char *format, ...) {
-    char line[256];
+    char line[512];
     va_list arguments;
     va_start(arguments, format);
     vsnprintf(line, sizeof(line), format, arguments);
@@ -131,7 +131,7 @@ static const char *const style =
 
 static void page_begin(page_t *page, const char *title) {
     put(page, "<!doctype html><meta charset=utf-8><meta name=viewport content='width=device-width,initial-scale=1'>"
-              "<title>PicoCalc PIM</title>");
+              "<title>PicoDeck OS</title>");
     put(page, style);
     put(page, "<nav><a href=/>Home</a><a href=/agenda>Agenda</a><a href=/todos>To-dos</a><a href=/notes>Notes</a>"
               "<a href=/journal>Journal</a><a href=/files>Files</a><a href=/import>Calendar</a></nav><h2>");
@@ -154,6 +154,22 @@ static bool name_ok(const char *name) {
     return true;
 }
 
+/* Slash-separated relative path (at most 3 levels); every segment must be a valid name. */
+static bool path_ok(const char *path) {
+    char segment[48];
+    unsigned depth = 0;
+    while (*path != '\0') {
+        size_t length = strcspn(path, "/");
+        if (length == 0 || length >= sizeof(segment) || ++depth > 3) return false;
+        memcpy(segment, path, length);
+        segment[length] = '\0';
+        if (!name_ok(segment)) return false;
+        path += length;
+        if (*path == '/') { path++; if (*path == '\0') return false; }
+    }
+    return depth > 0;
+}
+
 static size_t finish_page(page_t *page, pim_web_response_t *response) {
     if (page->overflow) {
         page->out[page->size - 1] = '\0';
@@ -165,7 +181,7 @@ static size_t finish_page(page_t *page, pim_web_response_t *response) {
 /* ---- pages ---- */
 
 static void page_login(page_t *page, pim_web_response_t *response, bool locked) {
-    page_begin(page, "PicoCalc PIM");
+    page_begin(page, "PicoDeck OS");
     if (locked) put(page, "<p>Too many wrong PINs. Reconnect Wi-Fi on the device to try again.</p>");
     else put(page, "<p>Enter the PIN shown on the PicoCalc screen.</p>"
                    "<form method=post action=/login><input name=pin inputmode=numeric autofocus> <button>Log in</button></form>");
@@ -179,7 +195,7 @@ static void page_home(pim_web_t *web, page_t *page, pim_web_response_t *response
     pim_journal_list(web->root, newest, 1, &journal_total);
     for (size_t i = 0; i < web->database->todo_count; i++) if (!web->database->todos[i].completed) open++;
     format_date(date, sizeof(date), web->today);
-    page_begin(page, "PicoCalc PIM");
+    page_begin(page, "PicoDeck OS");
     putf(page, "<p>Now: %s %02u:%02u</p>", date, web->minutes / 60, web->minutes % 60);
     count = pim_appointments_on(web->database, web->today, indices, PIM_MAX_APPOINTMENTS);
     putf(page, "<h3>Today (%u)</h3><ul>", (unsigned)count);
@@ -265,11 +281,13 @@ static void page_todos(pim_web_t *web, page_t *page, pim_web_response_t *respons
     page_begin(page, "To-dos");
     put(page, "<form method=post action=/todos/add><input name=title maxlength=63 size=30 required> "
               "<select name=priority><option value=1>normal</option><option value=2>high</option><option value=0>low</option></select> "
-              "<button>Add</button></form><ul>");
+              "due <input name=due placeholder=DD-MM-YYYY size=10> <button>Add</button></form><ul>");
     for (size_t i = 0; i < web->database->todo_count; i++) {
         const pim_todo_t *item = &web->database->todos[i];
+        pim_date_t due;
         putf(page, "<li%s>[%s] ", item->completed ? " class=d" : "", priority_names[item->priority]);
         put_escaped(page, item->title);
+        if (pim_todo_due(item, &due)) { char text[16]; format_date(text, sizeof(text), due); putf(page, " (due %s)", text); }
         putf(page, " <form method=post action=/todos/toggle><input type=hidden name=id value=%lu><button>%s</button></form> "
                    "<form method=post action=/todos/delete><input type=hidden name=id value=%lu><button>Delete</button></form></li>",
              (unsigned long)item->id, item->completed ? "Undo" : "Done", (unsigned long)item->id);
@@ -288,6 +306,11 @@ static void do_todo(pim_web_t *web, const char *path, const char *body, pim_web_
         param_get(body, "title", todo.title, sizeof(todo.title));
         param_get(body, "priority", text, sizeof(text));
         todo.priority = (pim_priority_t)atoi(text);
+        param_get(body, "due", text, sizeof(text));
+        if (text[0] != '\0') {
+            pim_date_t due;
+            if (!parse_date(text, &due) || !pim_todo_set_due(&todo, due)) { fail(response, out, out_size, 400, "Invalid due date (use DD-MM-YYYY)"); return; }
+        }
         if (!pim_add_todo(web->database, &todo)) { fail(response, out, out_size, 400, "Could not add (full or empty title)"); return; }
         commit(web);
     } else {
@@ -422,27 +445,85 @@ static void do_journal(pim_web_t *web, const char *path, const char *body, pim_w
     redirect(response, "/journal");
 }
 
-static void join_path(char *out, size_t size, const char *root, const char *name) { snprintf(out, size, "%s/%s", root, name); }
+static void join_path(char *out, size_t size, const char *root, const char *name) {
+    size_t length = strlen(root);
+    if (length + 2 > size) { out[0] = '\0'; return; }
+    memcpy(out, root, length);
+    out[length] = '/';
+    {
+        size_t room = size - length - 1, name_length = strlen(name);
+        if (name_length >= room) name_length = room - 1;
+        memcpy(out + length + 1, name, name_length);
+        out[length + 1 + name_length] = '\0';
+    }
+}
 
-static void page_files(pim_web_t *web, page_t *page, pim_web_response_t *response) {
+static void page_files(pim_web_t *web, page_t *page, pim_web_response_t *response, const char *query) {
     DIR *directory;
     struct dirent *entry;
+    char dir[150], folder[200], prefix[160];
+    param_get(query, "dir", dir, sizeof(dir));
+    if (dir[0] != '\0' && !path_ok(dir)) dir[0] = '\0';
+    if (dir[0] != '\0') join_path(folder, sizeof(folder), web->root, dir);
+    else snprintf(folder, sizeof(folder), "%s", web->root);
+    snprintf(prefix, sizeof(prefix), "%s%s", dir, dir[0] != '\0' ? "/" : "");
     page_begin(page, "Files");
-    put(page, "<form method=get action=/edit>New or open: <input name=name maxlength=47 required> <button>Edit</button></form><ul>");
-    directory = opendir(web->root);
+    putf(page, "<p>/%s%s</p>", dir, dir[0] != '\0' ? "/" : "");
+    if (dir[0] != '\0') {
+        char *slash = strrchr(dir, '/');
+        if (slash != NULL) { *slash = '\0'; putf(page, "<p><a href='/files?dir=%s'>.. up</a></p>", dir); }
+        else put(page, "<p><a href='/files'>.. up</a></p>");
+    }
+    putf(page, "<form method=get action=/edit>New or open: <input name=name value='%s' maxlength=100 required> "
+               "<button>Edit</button></form><ul>", prefix);
+    directory = opendir(folder);
     while (directory != NULL && (entry = readdir(directory)) != NULL) {
         char path[320];
         struct stat info;
         if (!name_ok(entry->d_name)) continue;
-        join_path(path, sizeof(path), web->root, entry->d_name);
-        if (stat(path, &info) != 0 || !S_ISREG(info.st_mode)) continue;
-        putf(page, "<li><a href='/edit?name=%s'>%s</a> (%lu bytes) <a href='/file/%s'>download</a> "
-                   "<form method=post action=/files/delete><input type=hidden name=name value='%s'><button>Delete</button></form></li>",
-             entry->d_name, entry->d_name, (unsigned long)info.st_size, entry->d_name, entry->d_name);
+        join_path(path, sizeof(path), folder, entry->d_name);
+        if (stat(path, &info) != 0) continue;
+        if (S_ISDIR(info.st_mode)) {
+            putf(page, "<li>[dir] <a href='/files?dir=%s%s'>%s</a></li>", prefix, entry->d_name, entry->d_name);
+            continue;
+        }
+        if (!S_ISREG(info.st_mode)) continue;
+        putf(page, "<li><a href='/edit?name=%s%s'>%s</a> (%lu bytes) <a href='/file/%s%s'>download</a> "
+                   "<form method=post action=/files/delete><input type=hidden name=name value='%s%s'><button>Delete</button></form></li>",
+             prefix, entry->d_name, entry->d_name, (unsigned long)info.st_size, prefix, entry->d_name, prefix, entry->d_name);
     }
     if (directory != NULL) closedir(directory);
-    put(page, "</ul><p>Upload from a PC: curl -H 'Cookie: pim=PIN' -T file http://DEVICE:8080/upload/NAME</p>");
+    put(page, "</ul><p>Upload from a PC: curl -H 'Cookie: pim=PIN' --data-binary @file http://DEVICE:8080/upload/NAME "
+              "(or use tools/pim-sync.sh)</p>");
     finish_page(page, response);
+}
+
+/* Lists "path size" for every file below the root (3 levels deep), for tools/pim-sync.sh. */
+static char manifest_path[200];
+static void manifest_walk(const char *root, size_t prefix_length, unsigned depth, page_t *page) {
+    DIR *directory = opendir(manifest_path);
+    struct dirent *entry;
+    size_t base = strlen(manifest_path);
+    (void)root;
+    while (directory != NULL && (entry = readdir(directory)) != NULL) {
+        struct stat info;
+        if (!name_ok(entry->d_name) || base + strlen(entry->d_name) + 2 >= sizeof(manifest_path)) continue;
+        snprintf(manifest_path + base, sizeof(manifest_path) - base, "/%.47s", entry->d_name);
+        if (stat(manifest_path, &info) == 0) {
+            if (S_ISDIR(info.st_mode) && depth < 3) manifest_walk(root, prefix_length, depth + 1, page);
+            else if (S_ISREG(info.st_mode) && depth > 0) putf(page, "%s %lu\n", manifest_path + prefix_length + 1, (unsigned long)info.st_size);
+        }
+        manifest_path[base] = '\0';
+    }
+    if (directory != NULL) closedir(directory);
+}
+
+static void do_manifest(pim_web_t *web, pim_web_response_t *response, char *out, size_t out_size) {
+    page_t page = {out, out_size, 0, false};
+    snprintf(manifest_path, sizeof(manifest_path), "%s", web->root);
+    manifest_walk(web->root, strlen(web->root), 1, &page);
+    if (page.overflow) { fail(response, out, out_size, 500, "Too many files for the manifest"); return; }
+    set_response(response, 200, "text/plain", strlen(out));
 }
 
 static size_t read_file(const char *path, char *buffer, size_t size, bool *too_big) {
@@ -457,12 +538,12 @@ static size_t read_file(const char *path, char *buffer, size_t size, bool *too_b
 }
 
 static void page_edit(pim_web_t *web, page_t *page, pim_web_response_t *response, const char *query, char *out, size_t out_size) {
-    char name[64], path[160];
+    char name[150], path[200];
     static char text[PIM_WEB_EDIT_MAX + 1];
     size_t length;
     bool too_big;
     param_get(query, "name", name, sizeof(name));
-    if (!name_ok(name)) { fail(response, out, out_size, 400, "Invalid file name"); return; }
+    if (!path_ok(name)) { fail(response, out, out_size, 400, "Invalid file name"); return; }
     join_path(path, sizeof(path), web->root, name);
     length = read_file(path, text, PIM_WEB_EDIT_MAX, &too_big);
     if (too_big) { fail(response, out, out_size, 413, "File is too large to edit in the browser; download it instead"); return; }
@@ -477,10 +558,15 @@ static void page_edit(pim_web_t *web, page_t *page, pim_web_response_t *response
 }
 
 static bool write_file(pim_web_t *web, const char *name, const char *data, size_t length) {
-    char path[160];
+    char path[200];
     FILE *file;
     bool ok;
     join_path(path, sizeof(path), web->root, name);
+    for (char *slash = strchr(path + strlen(web->root) + 1, '/'); slash != NULL; slash = strchr(slash + 1, '/')) {
+        *slash = '\0';
+        mkdir(path, 0777);
+        *slash = '/';
+    }
     file = fopen(path, "wb");
     if (file == NULL) return false;
     ok = length == 0 || fwrite(data, 1, length, file) == length;
@@ -527,10 +613,10 @@ bool pim_web_authorized(const pim_web_t *web, const char *cookie) {
 void pim_web_handle(pim_web_t *web, const char *method, const char *target, const char *cookie,
                     const char *body, size_t body_length, char *out, size_t out_size,
                     pim_web_response_t *response) {
-    char path[96];
+    char path[160];
     const char *query = strchr(target, '?');
     page_t page = {out, out_size, 0, false};
-    bool post = strcmp(method, "POST") == 0, get = strcmp(method, "GET") == 0;
+    bool post = strcmp(method, "POST") == 0 || strcmp(method, "PUT") == 0, get = strcmp(method, "GET") == 0;
     size_t path_length = query == NULL ? strlen(target) : (size_t)(query - target);
     memset(response, 0, sizeof(*response));
     out[0] = '\0';
@@ -575,30 +661,31 @@ void pim_web_handle(pim_web_t *web, const char *method, const char *target, cons
     else if (get && strcmp(path, "/journal") == 0) page_journal(web, &page, response);
     else if (get && strcmp(path, "/journal/edit") == 0) page_journal_edit(web, &page, response, query, out, out_size);
     else if (post && (strcmp(path, "/journal/save") == 0 || strcmp(path, "/journal/delete") == 0)) do_journal(web, path, body, response, out, out_size);
-    else if (get && strcmp(path, "/files") == 0) page_files(web, &page, response);
+    else if (get && strcmp(path, "/files") == 0) page_files(web, &page, response, query);
+    else if (get && strcmp(path, "/manifest") == 0) do_manifest(web, response, out, out_size);
     else if (get && strcmp(path, "/edit") == 0) page_edit(web, &page, response, query, out, out_size);
     else if (post && strcmp(path, "/save") == 0) {
-        char name[64];
+        char name[150];
         static char text[PIM_WEB_BODY_MAX + 1];
         param_get(body, "name", name, sizeof(name));
         param_get(body, "text", text, sizeof(text));
-        if (!name_ok(name)) fail(response, out, out_size, 400, "Invalid file name");
+        if (!path_ok(name)) fail(response, out, out_size, 400, "Invalid file name");
         else if (strlen(text) > PIM_WEB_EDIT_MAX) fail(response, out, out_size, 413, "Text is limited to 4096 bytes");
         else if (!write_file(web, name, text, strlen(text))) fail(response, out, out_size, 500, "Could not write the file");
         else { web->changed = true; redirect(response, "/files"); }
     } else if (post && strcmp(path, "/files/delete") == 0) {
-        char name[64], file_path[160];
+        char name[150], file_path[200];
         param_get(body, "name", name, sizeof(name));
-        if (!name_ok(name)) { fail(response, out, out_size, 400, "Invalid file name"); return; }
+        if (!path_ok(name)) { fail(response, out, out_size, 400, "Invalid file name"); return; }
         join_path(file_path, sizeof(file_path), web->root, name);
         remove(file_path);
         web->changed = true;
         redirect(response, "/files");
     } else if (get && strncmp(path, "/file/", 6) == 0) {
-        char file_path[160];
+        char file_path[200];
         bool too_big;
         size_t length;
-        if (!name_ok(path + 6)) { fail(response, out, out_size, 400, "Invalid file name"); return; }
+        if (!path_ok(path + 6)) { fail(response, out, out_size, 400, "Invalid file name"); return; }
         join_path(file_path, sizeof(file_path), web->root, path + 6);
         length = read_file(file_path, out, out_size - 1, &too_big);
         if (too_big) { fail(response, out, out_size, 413, "File is too large to download here"); return; }
@@ -606,7 +693,7 @@ void pim_web_handle(pim_web_t *web, const char *method, const char *target, cons
         out[length] = '\0';
         set_response(response, 200, "application/octet-stream", length);
     } else if (post && strncmp(path, "/upload/", 8) == 0) {
-        if (!name_ok(path + 8)) fail(response, out, out_size, 400, "Invalid file name");
+        if (!path_ok(path + 8)) fail(response, out, out_size, 400, "Invalid file name");
         else if (body_length > PIM_WEB_UPLOAD_MAX) fail(response, out, out_size, 413, "Uploads are limited to 8 KiB");
         else if (!write_file(web, path + 8, body, body_length)) fail(response, out, out_size, 500, "Could not write the file");
         else { web->changed = true; fail(response, out, out_size, 201, "Uploaded"); }

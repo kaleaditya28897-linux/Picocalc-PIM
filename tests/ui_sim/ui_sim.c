@@ -283,15 +283,22 @@ static bool database_persisted(void) {
 
 static void test_home(void) {
     static const char *const entries[] = {"Calendar", "To-Do List", "Notes", "Journal", "Files",
-                                          "Text editor", "Tools", "Wi-Fi & web", "Tetris", "Dungeon RPG", "Space Invaders", "Solitaire", "Theme", "Telnet (BBS)"};
+                                          "Text editor", "Tools", "Wi-Fi & web", "Today", "Games", "Theme", "Telnet (BBS)"};
     reset_ui("home");
     for (size_t i = 0; i < sizeof(entries) / sizeof(entries[0]); i++) CHECK(see_line(entries[i]));
     CHECK(!see("Appointments"));
+    CHECK(see("Created by Aditya Kale"));
     CHECK(see("Battery: 87%"));
     sim_battery = 15 + 128; pump(1600); CHECK(see("Battery: 15% charging"));
     sim_battery = 9; pump(1600); CHECK(see("Battery: 9% LOW"));
     sim_battery = 0; pump(1600); CHECK(see("Battery: no data"));
     sim_battery = 87; pump(1600); CHECK(see("Battery: 87%"));
+    sim_battery = 87; pump(3200);
+    sim_battery = 9;
+    for (int i = 0; i < 400 && !see("LOW BATTERY"); i++) pump(10);
+    CHECK(see("LOW BATTERY 9%")); theme("low battery banner");
+    pump(900); CHECK(!see("LOW BATTERY"));
+    sim_battery = 87; pump(1600);
     theme("home");
     CHECK(focus_is("Calendar"));
     key(LV_KEY_RIGHT); CHECK(focus_is("To-Do List"));
@@ -305,7 +312,7 @@ static void test_home(void) {
     for (size_t i = 0; i < sizeof(entries) / sizeof(entries[0]); i++) {
         if (!activate(entries[i])) continue;
         key(LV_KEY_ESC);
-        CHECK(see_line("PicoCalc PIM"));
+        CHECK(see_line("PicoDeck OS"));
     }
 }
 
@@ -318,14 +325,14 @@ static void test_startup(void) {
     key('1'); key('5'); key(LV_KEY_RIGHT); key('0'); key('3'); key(LV_KEY_RIGHT);
     key(LV_KEY_UP); key(LV_KEY_RIGHT); key('1'); key('4'); key(LV_KEY_RIGHT); key('3'); key('0');
     CHECK(see("15") && see("03") && see("2027") && see("14") && see("30"));
-    CHECK(activate("Start")); CHECK(see_line("PicoCalc PIM")); CHECK(see("15-03-2027  14:30"));
+    CHECK(activate("Start")); CHECK(see_line("PicoDeck OS")); CHECK(see("15-03-2027  14:30"));
     CHECK(file_contains(ROOT "/today.cfg", "15-03-2027 14:30"));
     pump(6000); CHECK(see("15-03-2027  14:31")); /* clock advances */
     CHECK(activate("Calendar")); CHECK(see("03-2027")); CHECK(focus_is("15"));
     key(LV_KEY_ESC);
     pim_ui_start(&database, ROOT "/pim.dat"); pump(10);
     CHECK(see("Set date and time")); CHECK(see("14") && see("2027")); /* prefilled from the saved clock */
-    CHECK(activate("Start")); CHECK(see_line("PicoCalc PIM"));
+    CHECK(activate("Start")); CHECK(see_line("PicoDeck OS"));
 }
 
 static void test_calendar_navigation(void) {
@@ -342,7 +349,7 @@ static void test_calendar_navigation(void) {
     key(LV_KEY_LEFT); CHECK(see("12-2025")); CHECK(focus_is("31"));
     key(LV_KEY_ENTER); CHECK(see("31-12-2025")); theme("day-view");
     CHECK(see("No appointments"));
-    key(LV_KEY_ESC); CHECK(see_line("PicoCalc PIM"));
+    key(LV_KEY_ESC); CHECK(see_line("PicoDeck OS"));
     reset_ui("calendar-keys");
     CHECK(activate("Calendar"));
     key(','); CHECK(see("12-2025"));
@@ -358,7 +365,7 @@ static void test_calendar_navigation(void) {
     CHECK(goto_focus("Go to")); key(LV_KEY_RIGHT); CHECK(focus_is("Back")); key(LV_KEY_RIGHT); CHECK(focus_is("Today"));
     key(LV_KEY_UP); CHECK(focus_is("1"));
     CHECK(activate("Today")); CHECK(see("01-2026"));
-    CHECK(activate("Back")); CHECK(see_line("PicoCalc PIM"));
+    CHECK(activate("Back")); CHECK(see_line("PicoDeck OS"));
 }
 
 static void test_date_picker(void) {
@@ -392,7 +399,7 @@ static void test_date_picker(void) {
     reset_ui("today-from-picker");
     CHECK(activate("Calendar")); CHECK(activate("Go to")); key('2'); key('0');
     CHECK(activate("Set today")); key(LV_KEY_ESC); /* closes the message */
-    key(LV_KEY_ESC); CHECK(see_line("PicoCalc PIM"));
+    key(LV_KEY_ESC); CHECK(see_line("PicoDeck OS"));
     CHECK(activate("Calendar")); CHECK(see("01-2026")); CHECK(focus_is("20"));
     key(LV_KEY_ESC); CHECK(activate("Journal")); CHECK(see("20-01-2026"));
     reset_ui("date-picker-journal");
@@ -400,7 +407,7 @@ static void test_date_picker(void) {
     CHECK(activate("01-01-2026")); CHECK(see("Choose a date"));
     key('0'); key('7'); CHECK(activate("Go")); CHECK(see("07-01-2026")); theme("journal date");
     CHECK(activate("07-01-2026")); CHECK(activate("Back")); CHECK(see("07-01-2026"));
-    key(LV_KEY_ESC); CHECK(see_line("PicoCalc PIM"));
+    key(LV_KEY_ESC); CHECK(see_line("PicoDeck OS"));
 }
 
 static void test_time_entry(void) {
@@ -517,6 +524,22 @@ static void test_todos(void) {
     CHECK(activate("Back")); CHECK(see_line("New to-do"));
 }
 
+static void test_today(void) {
+    pim_todo_t todo = {.priority = PIM_PRIORITY_NORMAL};
+    reset_ui("today");
+    CHECK(activate("To-Do List"));
+    CHECK(goto_focus("<textarea>")); type("Pay rent");
+    CHECK(goto_focus("<dropdown>")); key(LV_KEY_ENTER); key(LV_KEY_DOWN); key(LV_KEY_ENTER);
+    CHECK(activate("Add"));
+    CHECK(database.todo_count == 1 && database.todos[0].priority == PIM_PRIORITY_HIGH);
+    key(LV_KEY_ESC);
+    snprintf(todo.title, sizeof(todo.title), "Later task");
+    CHECK(pim_add_todo(&database, &todo));
+    for (size_t i = 0; i < database.todo_count; i++) if (strcmp(database.todos[i].title, "Pay rent") == 0) pim_todo_set_due(&database.todos[i], (pim_date_t){2000, 1, 2});
+    CHECK(activate("Today")); CHECK(see("Appointments")); CHECK(see("To-dos due")); CHECK(see("! Pay rent")); CHECK(!see("Later task")); theme("today");
+    key(LV_KEY_ESC); CHECK(see_line("PicoDeck OS"));
+}
+
 static void test_notes(void) {
     char path[96];
     reset_ui("notes");
@@ -585,7 +608,7 @@ static void test_tools(void) {
     reset_ui("tools");
     CHECK(activate("Tools")); theme("tools");
     CHECK(see("Search") && see("Calculator") && see("Backup"));
-    CHECK(activate("Back")); CHECK(see("PicoCalc PIM"));
+    CHECK(activate("Back")); CHECK(see("PicoDeck OS"));
     /* calculator */
     CHECK(activate("Tools")); CHECK(activate("Calculator")); theme("calculator");
     CHECK(goto_focus("<textarea>")); type("2+3*4"); CHECK(see("= 14")); type("\n"); CHECK(see("= 14"));
@@ -643,10 +666,10 @@ static void test_timer(void) {
 
 static void test_scores(void) {
     reset_ui("scores");
-    CHECK(activate("Tetris"));
+    CHECK(activate("Games")); CHECK(activate("Tetris"));
     for (int i = 0; i < 60; i++) key(LV_KEY_ENTER);
     key(LV_KEY_ESC);
-    CHECK(see("PicoCalc PIM"));
+    CHECK(see("PicoDeck OS"));
     CHECK(exists(ROOT "/games/tetris/scores.txt") || exists(ROOT "/games/tetris/game.cfg"));
 }
 
@@ -693,7 +716,7 @@ static void test_files(void) {
     CHECK(activate("Delete")); CHECK(goto_focus("<textarea>")); type("notes"); CHECK(activate("Delete"));
     CHECK(see("Protected")); theme("protected"); key(LV_KEY_ENTER); CHECK(exists(ROOT "/notes"));
     CHECK(activate("Files"));
-    CHECK(activate("Home")); CHECK(see_line("PicoCalc PIM"));
+    CHECK(activate("Home")); CHECK(see_line("PicoDeck OS"));
 }
 
 static void test_text_editor_entry(void) {
@@ -701,7 +724,7 @@ static void test_text_editor_entry(void) {
     CHECK(activate("Text editor")); CHECK(see("Create text file"));
     CHECK(goto_focus("<textarea>")); type("todo.txt"); CHECK(activate("Create"));
     CHECK(see("todo.txt")); CHECK(exists(ROOT "/todo.txt"));
-    key(LV_KEY_ESC); CHECK(see_line("PicoCalc PIM"));
+    key(LV_KEY_ESC); CHECK(see_line("PicoDeck OS"));
 }
 
 static void test_wifi(void) {
@@ -723,7 +746,7 @@ static void test_wifi(void) {
     CHECK(goto_focus("<textarea>")); type("Bad"); key(LV_KEY_NEXT); type("nope");
     CHECK(activate("Connect")); CHECK(see("Wi-Fi failed")); theme("wifi failure"); key(LV_KEY_ESC);
     CHECK(!file_contains(ROOT "/wifi.cfg", "Bad"));
-    CHECK(activate("Back")); CHECK(see_line("PicoCalc PIM"));
+    CHECK(activate("Back")); CHECK(see_line("PicoDeck OS"));
 }
 
 static void test_wifi_networks(void) {
@@ -745,7 +768,7 @@ static void test_wifi_networks(void) {
     CHECK(!file_contains(ROOT "/wifi.cfg", "CafeWifi"));
     sim_scan_ok = false;
     CHECK(activate("Scan networks")); CHECK(see("Scan failed")); CHECK(activate("Back"));
-    CHECK(activate("Back")); CHECK(see_line("PicoCalc PIM"));
+    CHECK(activate("Back")); CHECK(see_line("PicoDeck OS"));
 }
 
 static void test_wifi_time(void) {
@@ -771,7 +794,7 @@ static void test_wifi_time(void) {
         uint16_t minutes = 0;
         pim_date_t date = sim_hooks.today(&minutes);
         CHECK(date.year == 2026 && date.month == 3 && minutes < 1440);
-        sim_hooks.changed(); CHECK(see_line("PicoCalc PIM"));
+        sim_hooks.changed(); CHECK(see_line("PicoDeck OS"));
     }
     /* sync from the startup screen */
     reset_ui("startup sync");
@@ -825,10 +848,10 @@ static void test_telnet(void) {
     sim_telnet_open = false; pump(10);
     CHECK(see("disconnected")); theme("telnet closed");
     sim_hooks.changed(); CHECK(see("disconnected")); /* web edits never kick you out of the terminal */
-    key(LV_KEY_ESC); CHECK(see_line("PicoCalc PIM")); CHECK(!sim_telnet_open);
+    key(LV_KEY_ESC); CHECK(see_line("PicoDeck OS")); CHECK(!sim_telnet_open);
     /* leaving with ESC while still connected closes the socket */
     CHECK(activate("Telnet (BBS)")); CHECK(activate("Connect")); CHECK(sim_telnet_open);
-    key(LV_KEY_ESC); CHECK(!sim_telnet_open); CHECK(see_line("PicoCalc PIM"));
+    key(LV_KEY_ESC); CHECK(!sim_telnet_open); CHECK(see_line("PicoDeck OS"));
 }
 
 void pim_input_set_game_mode(bool enabled) { (void)enabled; }
@@ -863,7 +886,7 @@ static void test_games(void) {
     reset_ui("games");
     baseline = count_timers();
 
-    CHECK(activate("Tetris")); CHECK(board_is_fullscreen()); CHECK(status_has("Tetris score 0"));
+    CHECK(activate("Games")); CHECK(activate("Tetris")); CHECK(board_is_fullscreen()); CHECK(status_has("Tetris score 0"));
     CHECK(count_timers() == baseline); theme("tetris");
     CHECK(lit_pixels(0, 0, 175, 320) > 800 && lit_pixels(175, 0, 320, 320) > 800);
     key(LV_KEY_LEFT); key(LV_KEY_RIGHT); key(LV_KEY_UP); key(LV_KEY_DOWN); theme("tetris moved");
@@ -872,9 +895,9 @@ static void test_games(void) {
     for (int i = 0; i < 300 && !status_has("GAME OVER"); i++) key(LV_KEY_ENTER);
     CHECK(status_has("GAME OVER")); theme("tetris over");
     key(LV_KEY_ENTER); CHECK(!status_has("GAME OVER") && status_has("score 0"));
-    key(LV_KEY_ESC); CHECK(see_line("PicoCalc PIM")); CHECK(count_timers() == baseline);
+    key(LV_KEY_ESC); CHECK(see_line("PicoDeck OS")); CHECK(count_timers() == baseline);
 
-    CHECK(activate("Dungeon RPG")); CHECK(board_is_fullscreen()); CHECK(status_has("floor 1")); theme("dungeon");
+    CHECK(activate("Games")); CHECK(activate("Dungeon RPG")); CHECK(board_is_fullscreen()); CHECK(status_has("floor 1")); theme("dungeon");
     CHECK(lit_pixels(0, 0, 320, 320) > 1500);
     {
         const uint32_t moves[] = {LV_KEY_RIGHT, LV_KEY_DOWN, LV_KEY_LEFT, LV_KEY_UP};
@@ -882,9 +905,9 @@ static void test_games(void) {
     }
     theme("dungeon played");
     key(LV_KEY_ENTER); theme("dungeon again");
-    key(LV_KEY_ESC); CHECK(see_line("PicoCalc PIM"));
+    key(LV_KEY_ESC); CHECK(see_line("PicoDeck OS"));
 
-    CHECK(activate("Space Invaders")); CHECK(board_is_fullscreen()); CHECK(status_has("score 0")); theme("invaders");
+    CHECK(activate("Games")); CHECK(activate("Space Invaders")); CHECK(board_is_fullscreen()); CHECK(status_has("score 0")); theme("invaders");
     CHECK(count_timers() == baseline);
     for (int i = 0; i < 6; i++) key(LV_KEY_LEFT);
     key(LV_KEY_ENTER); pump(150);
@@ -894,9 +917,9 @@ static void test_games(void) {
     for (int i = 0; i < 1500 && !status_has("GAME OVER"); i++) pump(10);
     CHECK(status_has("GAME OVER")); theme("invaders over");
     key(LV_KEY_ENTER); CHECK(!status_has("GAME OVER"));
-    key(LV_KEY_ESC); CHECK(see_line("PicoCalc PIM")); CHECK(count_timers() == baseline);
+    key(LV_KEY_ESC); CHECK(see_line("PicoDeck OS")); CHECK(count_timers() == baseline);
 
-    CHECK(activate("Solitaire")); CHECK(board_is_fullscreen()); CHECK(status_has("stock 24")); theme("solitaire");
+    CHECK(activate("Games")); CHECK(activate("Solitaire")); CHECK(board_is_fullscreen()); CHECK(status_has("stock 24")); theme("solitaire");
     CHECK(lit_pixels(0, 0, 320, 320) > 2500);
     key(LV_KEY_ENTER); CHECK(status_has("stock 23 waste 1")); theme("solitaire drawn");
     key(LV_KEY_RIGHT); key(LV_KEY_ENTER); theme("solitaire picked");
@@ -904,32 +927,59 @@ static void test_games(void) {
     key(LV_KEY_DOWN); keys(LV_KEY_RIGHT, 3); key(LV_KEY_UP); key(LV_KEY_DOWN); key(LV_KEY_ENTER); theme("solitaire tableau");
     key(LV_KEY_ENTER); key('f'); theme("solitaire foundation");
     key('n'); CHECK(status_has("moves 0") && status_has("stock 24"));
-    key(LV_KEY_ESC); CHECK(see_line("PicoCalc PIM")); CHECK(count_timers() == baseline);
+    key(LV_KEY_ESC); CHECK(see_line("PicoDeck OS")); CHECK(count_timers() == baseline);
+
+    CHECK(activate("Games")); CHECK(activate("Snake")); CHECK(board_is_fullscreen()); CHECK(status_has("Snake score 0")); theme("snake");
+    CHECK(lit_pixels(0, 0, 320, 260) > 300);
+    key(LV_KEY_UP); pump(400); key(LV_KEY_LEFT); pump(400); key(LV_KEY_DOWN); pump(400); theme("snake moved");
+    for (int i = 0; i < 300 && !status_has("GAME OVER"); i++) pump(100);
+    CHECK(status_has("GAME OVER")); theme("snake over");
+    key(LV_KEY_ENTER); CHECK(!status_has("GAME OVER") && status_has("score 0"));
+    key(LV_KEY_ESC); CHECK(see_line("PicoDeck OS")); CHECK(count_timers() == baseline);
+
+    CHECK(activate("Games")); CHECK(activate("2048")); CHECK(board_is_fullscreen()); CHECK(status_has("2048 score 0")); theme("2048");
+    CHECK(lit_pixels(0, 0, 320, 280) > 500);
+    for (int i = 0; i < 600 && !status_has("GAME OVER"); i++) key(i % 4 == 0 ? LV_KEY_LEFT : i % 4 == 1 ? LV_KEY_DOWN : i % 4 == 2 ? LV_KEY_RIGHT : LV_KEY_UP);
+    CHECK(status_number("2048 score ") > 0); theme("2048 played");
+    if (status_has("GAME OVER")) { key(LV_KEY_ENTER); CHECK(!status_has("GAME OVER")); }
+    key(LV_KEY_ESC); CHECK(see_line("PicoDeck OS")); CHECK(count_timers() == baseline);
+
+    CHECK(activate("Games")); CHECK(activate("Minesweeper")); CHECK(board_is_fullscreen()); CHECK(status_has("Mines left 24")); theme("mines");
+    key('f'); CHECK(status_has("Mines left 23")); key('f'); CHECK(status_has("Mines left 24"));
+    key(LV_KEY_ENTER); CHECK(status_has("revealed") && !status_has("revealed 0")); theme("mines opened");
+    for (int i = 0; i < 400 && !status_has("BOOM") && !status_has("CLEARED"); i++) {
+        key(i % 3 == 0 ? LV_KEY_RIGHT : i % 3 == 1 ? LV_KEY_DOWN : LV_KEY_LEFT); key(LV_KEY_ENTER);
+    }
+    theme("mines played");
+    if (status_has("BOOM") || status_has("CLEARED")) { key(LV_KEY_ENTER); CHECK(status_has("revealed 0")); }
+    key(LV_KEY_ESC); CHECK(see_line("PicoDeck OS")); CHECK(count_timers() == baseline);
 }
 
 static void test_theme_switcher(void) {
-    static const char *const names[] = {"Amber", "Green", "Manila"};
+    static const char *const names[] = {"Amber", "Green", "Manila", "Cyan", "Violet", "Red", "Mono", "Paper"};
+    static const uint32_t fgs[] = {0xffb000, 0x33ff33, 0x000000, 0x40e0ff, 0xc080ff, 0xff4040, 0xe0e0e0, 0x1a1a1a};
+    static const uint32_t bgs[] = {0, 0, 0xefe0b3, 0, 0, 0, 0, 0xf2f2f2};
     reset_ui("theme switcher");
     CHECK(activate("Theme")); CHECK(see_line("Theme")); CHECK(see("Saved to /PIM/theme.cfg")); theme("theme screen");
-    for (size_t i = 0; i < 3; i++) {
+    for (size_t i = 0; i < 8; i++) {
         uint32_t fg, bg;
         CHECK(activate(names[i]));
         { char current[32]; snprintf(current, sizeof(current), "Current: %s", names[i]); CHECK(see(current)); }
         pim_ui_theme_colors(&fg, &bg);
         CHECK(file_contains(ROOT "/theme.cfg", names[i]));
-        CHECK(i == 0 ? fg == 0xffb000 : i == 1 ? (fg == 0x33ff33 && bg == 0) : (fg == 0 && bg == 0xefe0b3));
+        CHECK(fg == fgs[i] && bg == bgs[i]);
         theme(names[i]);
         key(LV_KEY_ESC); theme("home after switch"); CHECK(activate("Theme"));
     }
     key(LV_KEY_ESC);
     pim_ui_start(&database, ROOT "/pim.dat"); confirm_startup();
-    { uint32_t fg, bg; pim_ui_theme_colors(&fg, &bg); CHECK(bg == 0xefe0b3); }
+    { uint32_t fg, bg; pim_ui_theme_colors(&fg, &bg); CHECK(bg == 0xf2f2f2); }
     forced_theme = "Amber";
 }
 
 static void test_navigation_leaks(void) {
     static const char *const entries[] = {"Calendar", "To-Do List", "Notes", "Journal", "Files",
-                                          "Text editor", "Tools", "Wi-Fi & web", "Tetris", "Dungeon RPG", "Space Invaders", "Solitaire", "Theme", "Telnet (BBS)"};
+                                          "Text editor", "Tools", "Wi-Fi & web", "Today", "Games", "Theme", "Telnet (BBS)"};
     lv_mem_monitor_t before, after;
     reset_ui("memory");
     for (int round = 0; round < 3; round++)
@@ -1001,6 +1051,7 @@ static int run_suite(const char *theme_name) {
     test_appointment_flow();
     test_appointment_limits();
     test_todos();
+    test_today();
     test_notes();
     test_journal();
     test_large_editor();

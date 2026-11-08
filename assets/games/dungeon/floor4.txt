@@ -1,14 +1,14 @@
-; Floor 4: # wall . floor @ start > stairs $ gold ! potion M monster
+; Floor 4: # wall . floor @ start > stairs $ gold ! potion M monster O orc B boss / sword [ armor
 ; Lines starting with ; are ignored. Keep it 16 wide, 12 tall with walls on the border.
 ################
-#@#.....#..M...#
+#@#.....#..O...#
 #.#.###.###.#.M#
 #...#.#.#...#..#
 ##.#..#.#.###..#
-#.....#.!.#....#
+#.....#.!/#....#
 #.#########$##.#
 #.#$..!...#...M#
 #.#.#####.###..#
 #........$M....#
-#....M$......M>#
+#....O$......M>#
 ################

@@ -160,6 +160,10 @@ static bool dungeon_enemy_at(const pim_dungeon_t *game, int8_t x, int8_t y) {
     return false;
 }
 
+static uint8_t dungeon_enemy_hp(uint8_t kind, uint8_t floor) {
+    return (uint8_t)(kind == 2 ? 10 + floor : kind == 1 ? 4 + floor / 2 : 2 + floor / 2);
+}
+
 static void dungeon_place(pim_dungeon_t *game, char item, uint8_t count) {
     for (uint8_t placed = 0, tries = 0; placed < count && tries < 200; tries++) {
         int8_t x = (int8_t)(1 + random_next(&game->rng) % (PIM_DUNGEON_WIDTH - 2));
@@ -184,10 +188,11 @@ static bool dungeon_load_floor(pim_dungeon_t *game) {
         bool border = x == 0 || y == 0 || x == PIM_DUNGEON_WIDTH - 1 || y == PIM_DUNGEON_HEIGHT - 1;
         if (c == '@' && !has_start && !border) { has_start = true; trial.player_x = x; trial.player_y = y; c = '.'; }
         else if (c == '>' && !has_stairs) has_stairs = true;
-        else if (c == 'M' && !border && trial.enemies < PIM_DUNGEON_MAX_ENEMIES) {
+        else if ((c == 'M' || c == 'O' || c == 'B') && !border && trial.enemies < PIM_DUNGEON_MAX_ENEMIES) {
             pim_enemy_t *enemy = &trial.enemy[trial.enemies++];
-            enemy->x = x; enemy->y = y; enemy->hp = (uint8_t)(2 + game->floor / 2); enemy->alive = true; c = '.';
-        } else if (c != '#' && c != '.' && c != '$' && c != '!') return false;
+            enemy->kind = c == 'B' ? 2 : c == 'O' ? 1 : 0;
+            enemy->x = x; enemy->y = y; enemy->hp = dungeon_enemy_hp(enemy->kind, game->floor); enemy->alive = true; c = '.';
+        } else if (c != '#' && c != '.' && c != '$' && c != '!' && c != '/' && c != '[') return false;
         if (border && c != '#' && c != '>') return false;
         trial.cells[y][x] = c;
     }
@@ -221,9 +226,16 @@ static void dungeon_generate(pim_dungeon_t *game) {
         int8_t y = (int8_t)(1 + random_next(&game->rng) % (PIM_DUNGEON_HEIGHT - 2));
         if (game->cells[y][x] == '.' && x + y >= 7 && !dungeon_enemy_at(game, x, y)) {
             pim_enemy_t *enemy = &game->enemy[game->enemies++];
-            enemy->x = x; enemy->y = y; enemy->hp = (uint8_t)(2 + game->floor / 2); enemy->alive = true;
+            enemy->kind = game->floor >= 3 && random_next(&game->rng) % 3 == 0 ? 1 : 0;
+            enemy->x = x; enemy->y = y; enemy->hp = dungeon_enemy_hp(enemy->kind, game->floor); enemy->alive = true;
         }
     }
+    if (game->floor == game->floors && game->enemies > 0) {
+        pim_enemy_t *boss = &game->enemy[game->enemies - 1];
+        boss->kind = 2; boss->hp = dungeon_enemy_hp(2, game->floor);
+    }
+    if (game->floor % 2 == 0) dungeon_place(game, '/', 1);
+    if (game->floor % 3 == 0) dungeon_place(game, '[', 1);
     dungeon_place(game, '$', 4);
     dungeon_place(game, '!', 2);
     game->player_x = 1;
@@ -255,7 +267,8 @@ static void dungeon_enemies_act(pim_dungeon_t *game) {
         distance = (int8_t)(absolute(dx) + absolute(dy));
         if (distance == 1) {
             if (random_next(&game->rng) % 2 == 0) {
-                uint8_t damage = (uint8_t)(1 + game->floor / 3 + random_next(&game->rng) % 2);
+                uint8_t damage = (uint8_t)(1 + game->floor / 3 + enemy->kind + random_next(&game->rng) % 2);
+                damage = damage > game->defense + 1 ? (uint8_t)(damage - game->defense) : 1;
                 game->health = damage >= game->health ? 0 : (uint8_t)(game->health - damage);
                 snprintf(game->message, sizeof(game->message), "Ouch! -%u HP", damage);
                 if (game->health == 0) { game->game_over = true; snprintf(game->message, sizeof(game->message), "You died"); }
@@ -290,11 +303,12 @@ void pim_dungeon_move(pim_dungeon_t *game, pim_direction_t direction) {
         pim_enemy_t *enemy = &game->enemy[i];
         uint8_t damage;
         if (!enemy->alive || enemy->x != x || enemy->y != y) continue;
-        damage = (uint8_t)(1 + random_next(&game->rng) % 3);
+        damage = (uint8_t)(1 + game->attack + random_next(&game->rng) % 3);
         if (damage >= enemy->hp) {
+            uint8_t reward = (uint8_t)(enemy->kind == 2 ? 40 : enemy->kind == 1 ? 15 : 10);
             enemy->alive = false; game->enemies--; game->kills++;
-            game->gold = game->gold > 245 ? 255 : (uint8_t)(game->gold + 10);
-            snprintf(game->message, sizeof(game->message), "Slain! +10 gold");
+            game->gold = game->gold > 255 - reward ? 255 : (uint8_t)(game->gold + reward);
+            snprintf(game->message, sizeof(game->message), enemy->kind == 2 ? "Boss slain! +%u gold" : "Slain! +%u gold", reward);
         } else {
             enemy->hp = (uint8_t)(enemy->hp - damage);
             snprintf(game->message, sizeof(game->message), "You hit for %u", damage);
@@ -311,6 +325,10 @@ void pim_dungeon_move(pim_dungeon_t *game, pim_direction_t direction) {
         game->cells[y][x] = '.';
         game->health = (uint8_t)(game->health + 8 > game->max_health ? game->max_health : game->health + 8);
         snprintf(game->message, sizeof(game->message), "Potion! +HP");
+    } else if (cell == '/' || cell == '[') {
+        game->cells[y][x] = '.';
+        if (cell == '/') { if (game->attack < 5) game->attack++; snprintf(game->message, sizeof(game->message), "Sword! Attack %u", game->attack); }
+        else { if (game->defense < 3) game->defense++; snprintf(game->message, sizeof(game->message), "Armor! Defense %u", game->defense); }
     } else if (cell == '>') {
         if (game->floor >= game->floors) { game->won = true; snprintf(game->message, sizeof(game->message), "You escaped!"); return; }
         game->floor++;
@@ -503,4 +521,195 @@ bool pim_solitaire_to_foundation(pim_solitaire_t *game, pim_solitaire_zone_t fro
         card = game->tableau[from_index][game->tableau_count[from_index] - 1];
     else return false;
     return pim_solitaire_move(game, from, from_index, 1, PIM_SOL_FOUNDATION, (uint8_t)(card / 13));
+}
+
+/* ---- Snake ---- */
+
+static void snake_place_food(pim_snake_t *game) {
+    for (uint16_t tries = 0; tries < 400; tries++) {
+        int8_t x = (int8_t)(random_next(&game->rng) % PIM_SNAKE_WIDTH), y = (int8_t)(random_next(&game->rng) % PIM_SNAKE_HEIGHT);
+        bool free_cell = true;
+        for (uint16_t i = 0; i < game->length; i++) if (game->x[i] == x && game->y[i] == y) { free_cell = false; break; }
+        if (free_cell) { game->food_x = x; game->food_y = y; return; }
+    }
+    game->won = game->game_over = true;
+}
+
+void pim_snake_reset(pim_snake_t *game, uint32_t seed) {
+    memset(game, 0, sizeof(*game));
+    game->rng = seed * 2654435761u + 31u;
+    game->length = 3;
+    for (uint16_t i = 0; i < 3; i++) { game->x[i] = (int8_t)(10 - i); game->y[i] = 7; }
+    game->direction = game->pending = PIM_RIGHT;
+    snake_place_food(game);
+}
+
+void pim_snake_turn(pim_snake_t *game, pim_direction_t direction) {
+    bool opposite = (direction == PIM_UP && game->direction == PIM_DOWN) || (direction == PIM_DOWN && game->direction == PIM_UP) ||
+                    (direction == PIM_LEFT && game->direction == PIM_RIGHT) || (direction == PIM_RIGHT && game->direction == PIM_LEFT);
+    if (!opposite) game->pending = direction;
+}
+
+void pim_snake_tick(pim_snake_t *game) {
+    int8_t x = game->x[0], y = game->y[0];
+    bool grow;
+    if (game->game_over) return;
+    game->direction = game->pending;
+    if (game->direction == PIM_UP) y--; else if (game->direction == PIM_DOWN) y++;
+    else if (game->direction == PIM_LEFT) x--; else x++;
+    if (x < 0 || y < 0 || x >= PIM_SNAKE_WIDTH || y >= PIM_SNAKE_HEIGHT) { game->game_over = true; return; }
+    grow = x == game->food_x && y == game->food_y;
+    /* The tail cell is vacated this tick unless the snake grows. */
+    for (uint16_t i = 0; i + (grow ? 0 : 1) < game->length; i++)
+        if (game->x[i] == x && game->y[i] == y) { game->game_over = true; return; }
+    if (grow) game->length++;
+    for (uint16_t i = game->length - 1; i > 0; i--) { game->x[i] = game->x[i - 1]; game->y[i] = game->y[i - 1]; }
+    game->x[0] = x; game->y[0] = y;
+    if (grow) {
+        game->score = (uint16_t)(game->score + 10);
+        if (game->length >= PIM_SNAKE_WIDTH * PIM_SNAKE_HEIGHT) { game->won = game->game_over = true; return; }
+        snake_place_food(game);
+    }
+}
+
+uint16_t pim_snake_interval_ms(const pim_snake_t *game) {
+    unsigned faster = (unsigned)(game->length > 3 ? game->length - 3 : 0) * 4;
+    return (uint16_t)(faster >= 100 ? 70 : 170 - faster);
+}
+
+/* ---- 2048 ---- */
+
+static void game2048_spawn(pim_2048_t *game) {
+    uint8_t empty[16], count = 0;
+    for (uint8_t i = 0; i < 16; i++) if (game->cells[i / 4][i % 4] == 0) empty[count++] = i;
+    if (count == 0) return;
+    uint8_t pick = empty[random_next(&game->rng) % count];
+    game->cells[pick / 4][pick % 4] = random_next(&game->rng) % 10 == 0 ? 2 : 1;
+}
+
+static bool game2048_stuck(const pim_2048_t *game) {
+    for (uint8_t y = 0; y < 4; y++) for (uint8_t x = 0; x < 4; x++) {
+        if (game->cells[y][x] == 0) return false;
+        if (x < 3 && game->cells[y][x] == game->cells[y][x + 1]) return false;
+        if (y < 3 && game->cells[y][x] == game->cells[y + 1][x]) return false;
+    }
+    return true;
+}
+
+void pim_2048_reset(pim_2048_t *game, uint32_t seed) {
+    memset(game, 0, sizeof(*game));
+    game->rng = seed * 2654435761u + 2048u;
+    game2048_spawn(game);
+    game2048_spawn(game);
+}
+
+bool pim_2048_move(pim_2048_t *game, pim_direction_t direction) {
+    bool moved = false;
+    if (game->game_over) return false;
+    for (uint8_t line = 0; line < 4; line++) {
+        uint8_t values[4], out[4] = {0}, count = 0, written = 0;
+        bool merged_last = false;
+        for (uint8_t i = 0; i < 4; i++) {
+            /* Index i runs from the edge the tiles slide toward. */
+            uint8_t y = direction == PIM_UP ? i : direction == PIM_DOWN ? (uint8_t)(3 - i) : line;
+            uint8_t x = direction == PIM_LEFT ? i : direction == PIM_RIGHT ? (uint8_t)(3 - i) : line;
+            values[i] = game->cells[y][x];
+        }
+        for (uint8_t i = 0; i < 4; i++) {
+            if (values[i] == 0) continue;
+            if (written > 0 && !merged_last && out[written - 1] == values[i]) {
+                out[written - 1]++;
+                game->score += 1u << out[written - 1];
+                if (out[written - 1] >= 11) game->won = true;
+                merged_last = true;
+            } else { out[written++] = values[i]; merged_last = false; }
+            count++;
+        }
+        (void)count;
+        for (uint8_t i = 0; i < 4; i++) {
+            uint8_t y = direction == PIM_UP ? i : direction == PIM_DOWN ? (uint8_t)(3 - i) : line;
+            uint8_t x = direction == PIM_LEFT ? i : direction == PIM_RIGHT ? (uint8_t)(3 - i) : line;
+            if (game->cells[y][x] != out[i]) moved = true;
+            game->cells[y][x] = out[i];
+        }
+    }
+    if (!moved) return false;
+    game2048_spawn(game);
+    game->game_over = game2048_stuck(game);
+    return true;
+}
+
+/* ---- Minesweeper ---- */
+
+void pim_mines_reset(pim_mines_t *game, uint32_t seed) {
+    memset(game, 0, sizeof(*game));
+    game->rng = seed * 2654435761u + 5u;
+    game->cursor_x = PIM_MINES_WIDTH / 2;
+    game->cursor_y = PIM_MINES_HEIGHT / 2;
+}
+
+void pim_mines_move_cursor(pim_mines_t *game, int8_t dx, int8_t dy) {
+    int8_t x = (int8_t)(game->cursor_x + dx), y = (int8_t)(game->cursor_y + dy);
+    if (x >= 0 && x < PIM_MINES_WIDTH) game->cursor_x = x;
+    if (y >= 0 && y < PIM_MINES_HEIGHT) game->cursor_y = y;
+}
+
+uint8_t pim_mines_around(const pim_mines_t *game, int8_t x, int8_t y) {
+    uint8_t count = 0;
+    for (int8_t dy = -1; dy <= 1; dy++) for (int8_t dx = -1; dx <= 1; dx++) {
+        int8_t nx = (int8_t)(x + dx), ny = (int8_t)(y + dy);
+        if ((dx || dy) && nx >= 0 && ny >= 0 && nx < PIM_MINES_WIDTH && ny < PIM_MINES_HEIGHT && (game->flags[ny][nx] & PIM_MINE_MINE)) count++;
+    }
+    return count;
+}
+
+uint8_t pim_mines_flags_left(const pim_mines_t *game) {
+    int left = PIM_MINES_COUNT;
+    for (int8_t y = 0; y < PIM_MINES_HEIGHT; y++) for (int8_t x = 0; x < PIM_MINES_WIDTH; x++) if (game->flags[y][x] & PIM_MINE_FLAGGED) left--;
+    return (uint8_t)(left < 0 ? 0 : left);
+}
+
+void pim_mines_flag(pim_mines_t *game, int8_t x, int8_t y) {
+    if (game->game_over || x < 0 || y < 0 || x >= PIM_MINES_WIDTH || y >= PIM_MINES_HEIGHT || (game->flags[y][x] & PIM_MINE_REVEALED)) return;
+    game->flags[y][x] ^= PIM_MINE_FLAGGED;
+}
+
+static void mines_flood(pim_mines_t *game, int8_t x, int8_t y) {
+    /* Explicit stack: the device has only a few KB of stack. */
+    static int8_t stack[PIM_MINES_WIDTH * PIM_MINES_HEIGHT * 8][2];
+    size_t top = 0;
+    stack[top][0] = x; stack[top++][1] = y;
+    while (top > 0) {
+        int8_t cx = stack[top - 1][0], cy = stack[top - 1][1];
+        top--;
+        if (cx < 0 || cy < 0 || cx >= PIM_MINES_WIDTH || cy >= PIM_MINES_HEIGHT) continue;
+        if (game->flags[cy][cx] & (PIM_MINE_REVEALED | PIM_MINE_FLAGGED | PIM_MINE_MINE)) continue;
+        game->flags[cy][cx] |= PIM_MINE_REVEALED;
+        game->revealed++;
+        if (pim_mines_around(game, cx, cy) != 0) continue;
+        for (int8_t dy = -1; dy <= 1; dy++) for (int8_t dx = -1; dx <= 1; dx++)
+            if ((dx || dy) && top < sizeof(stack) / sizeof(stack[0])) { stack[top][0] = (int8_t)(cx + dx); stack[top++][1] = (int8_t)(cy + dy); }
+    }
+}
+
+void pim_mines_reveal(pim_mines_t *game, int8_t x, int8_t y) {
+    if (game->game_over || x < 0 || y < 0 || x >= PIM_MINES_WIDTH || y >= PIM_MINES_HEIGHT) return;
+    if (game->flags[y][x] & (PIM_MINE_REVEALED | PIM_MINE_FLAGGED)) return;
+    if (!game->placed) {
+        for (uint8_t placed = 0; placed < PIM_MINES_COUNT;) {
+            int8_t mx = (int8_t)(random_next(&game->rng) % PIM_MINES_WIDTH), my = (int8_t)(random_next(&game->rng) % PIM_MINES_HEIGHT);
+            if ((mx >= x - 1 && mx <= x + 1 && my >= y - 1 && my <= y + 1) || (game->flags[my][mx] & PIM_MINE_MINE)) continue;
+            game->flags[my][mx] |= PIM_MINE_MINE;
+            placed++;
+        }
+        game->placed = true;
+    }
+    if (game->flags[y][x] & PIM_MINE_MINE) {
+        game->game_over = true;
+        for (int8_t row = 0; row < PIM_MINES_HEIGHT; row++) for (int8_t col = 0; col < PIM_MINES_WIDTH; col++)
+            if (game->flags[row][col] & PIM_MINE_MINE) game->flags[row][col] |= PIM_MINE_REVEALED;
+        return;
+    }
+    mines_flood(game, x, y);
+    if (game->revealed == PIM_MINES_WIDTH * PIM_MINES_HEIGHT - PIM_MINES_COUNT) game->won = game->game_over = true;
 }

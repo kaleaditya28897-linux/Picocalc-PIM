@@ -1,0 +1,14 @@
+; Floor 6: # wall . floor @ start > stairs $ gold ! potion M monster O orc B boss / sword [ armor
+; Lines starting with ; are ignored. Keep it 16 wide, 12 tall with walls on the border.
+################
+#@...#....O...$#
+#.##.#.####.##.#
+#.#.##.#.##.##.#
+#.#....#....#..#
+#.######.####.##
+#...$..#.O.#...#
+###.##.#.#.#.#.#
+#....[.#.#...#.#
+#.#.####.#.M...#
+#M..!......O..>#
+################

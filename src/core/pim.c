@@ -127,6 +127,33 @@ size_t pim_appointments_on(const pim_database_t *database, pim_date_t date, size
     return count;
 }
 
+bool pim_todo_due(const pim_todo_t *todo, pim_date_t *date) {
+    pim_date_t value = {(uint16_t)(2000 + todo->due_year), todo->due_month, todo->due_day};
+    if (!pim_date_is_valid(value)) return false;
+    if (date != NULL) *date = value;
+    return true;
+}
+
+bool pim_todo_set_due(pim_todo_t *todo, pim_date_t date) {
+    if (!pim_date_is_valid(date) || date.year < 2000 || date.year > 2099) return false;
+    todo->due_year = (uint8_t)(date.year - 2000);
+    todo->due_month = date.month;
+    todo->due_day = date.day;
+    return true;
+}
+
+void pim_todo_clear_due(pim_todo_t *todo) { todo->due_year = todo->due_month = todo->due_day = 0; }
+
+size_t pim_todos_due_by(const pim_database_t *database, pim_date_t date, size_t *indices, size_t max_indices) {
+    size_t count = 0;
+    for (size_t i = 0; i < database->todo_count && count < max_indices; i++) {
+        pim_date_t due;
+        if (!database->todos[i].completed && pim_todo_due(&database->todos[i], &due) && pim_date_compare(due, date) <= 0)
+            indices[count++] = i;
+    }
+    return count;
+}
+
 bool pim_add_todo(pim_database_t *database, const pim_todo_t *todo) {
     if (database->todo_count == PIM_MAX_TODOS || todo->priority > PIM_PRIORITY_HIGH ||
         todo->title[0] == '\0') return false;

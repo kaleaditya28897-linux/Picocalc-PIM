@@ -28,6 +28,7 @@ typedef struct {
     uint32_t id;
     pim_priority_t priority;
     bool completed;
+    uint8_t due_year, due_month, due_day; /* year - 2000; all zero means no due date. Uses former padding. */
     uint32_t created_at;
     char title[64];
 } pim_todo_t;
@@ -76,6 +77,11 @@ size_t pim_appointments_on(const pim_database_t *database, pim_date_t date, size
 bool pim_add_todo(pim_database_t *database, const pim_todo_t *todo);
 bool pim_delete_todo(pim_database_t *database, size_t index);
 void pim_toggle_todo(pim_database_t *database, size_t index);
+bool pim_todo_due(const pim_todo_t *todo, pim_date_t *date);
+bool pim_todo_set_due(pim_todo_t *todo, pim_date_t date);
+void pim_todo_clear_due(pim_todo_t *todo);
+/* Open to-dos that are due on or before `date` (overdue included), in list order. */
+size_t pim_todos_due_by(const pim_database_t *database, pim_date_t date, size_t *indices, size_t max_indices);
 bool pim_add_note(pim_database_t *database, const pim_note_t *note);
 bool pim_update_note(pim_database_t *database, size_t index, const pim_note_t *note);
 bool pim_delete_note(pim_database_t *database, size_t index);

@@ -1,4 +1,4 @@
-# PicoCalc PIM
+# PicoDeck OS (PicoCalc PIM)
 
 PicoCalc PIM is a C11 firmware PDA for the ClockworkPi PicoCalc with a Raspberry Pi Pico 2 W. It uses the official PicoCalc LVGL display and keyboard drivers, stores its PDA database on a FAT32 SD card, and has an amber-on-black CRT interface.
 
@@ -7,14 +7,16 @@ PicoCalc PIM is a C11 firmware PDA for the ClockworkPi PicoCalc with a Raspberry
 - A combined calendar/appointment app: arrow to a day and press Enter, then pick the start hour, minute and length with UP/DOWN (no typing dates), then enter a title and notes. Days with appointments show `*`. Journal entries use the same selected day.
 - Priority to-dos, notes, and a free-text journal: one file per day (`/PIM/journal/DD-MM-YYYY.md`) edited like the text editor. Old database journals are migrated automatically.
 - Date and time entry: scroll the calendar continuously with the arrows, `,` `.` change month, `<` `>` change year, `T` jumps to today and `G` (or Go to) opens a DD-MM-YYYY picker; in the pickers you can type digits or use UP/DOWN. Set today stores the current date in `/PIM/today.cfg` (the device has no clock).
-- Theme switcher (Home → Theme): Amber, Green terminal and Manila (black on manila, easy on the eyes). The choice is saved in `/PIM/theme.cfg`.
+- Theme switcher (Home → Theme): Amber, Green, Manila, Cyan, Violet, Red, Mono and Paper (light themes: Manila and Paper). The choice is saved in `/PIM/theme.cfg`.
 - Sound toggle (Home → Sound: ON/OFF): key clicks and game effects on the speakers, saved in `/PIM/sound.cfg`.
 - Battery saving: the backlight dims after 30 s and turns off after 2 min idle (any key wakes it, except during games); Wi-Fi powers off after 15 idle minutes or via Wi-Fi → Wi-Fi off.
 - Reliability: an 8 s hardware watchdog reboots a hung device, and large buffers no longer live on the 4 KB stack.
 - Battery monitor on Home: percentage and charging state read from the PicoCalc keyboard MCU power gauge (refreshed every 15 s; shows "no data" if unavailable). The MCU only reports a valid level when running on battery first, then plugging in USB.
 - Auto start: at boot the PicoCalc scans for a saved Wi-Fi network; if one is in range it joins, syncs the time over NTP and opens Home directly. Otherwise (or if the sync fails) it shows the manual time screen below.
 - Startup clock: without a network, every boot asks for the date and time (prefilled from the last session, cannot be skipped). The clock then runs from that moment, is shown on Home, and drives "today" in Calendar and Journal. It is saved to `/PIM/today.cfg`.
-- Four graphical games with more sound effects (move, pickup, shoot, hurt, level-up, win), a top-5 high-score table each, and per-game folders on the SD card (`/PIM/games/<game>/`): `game.cfg` settings, `scores.txt`, and editable dungeon floors (`floor1.txt`..`floor5.txt`, 16x12 maps). Missing files are created from built-in defaults and never overwritten.
+- Seven graphical games under Home -> Games: Tetris, Dungeon RPG (8 floors, orcs, a boss, sword/armor pickups), Space Invaders, Solitaire, Snake, Minesweeper and 2048. Each has sound effects, a top-5 score table, and a folder on the SD card (`/PIM/games/<game>/`) with `game.cfg`, `scores.txt` and, for the dungeon, editable `floor1.txt`..`floor8.txt` (16x12 maps; `M` monster, `O` orc, `B` boss, `/` sword, `[` armor). Missing files are created from defaults and never overwritten; to get the new dungeon on an older card, delete `/PIM/games/dungeon/`'s files.
+- To-dos have optional due dates; Home -> Today lists today's appointments and due/overdue to-dos. A low-battery banner and sound appear at 10% or less.
+- The web server has a file browser with subfolders (up to 3 levels) and `GET /manifest`; `tools/pim-sync.sh pull|push HOST PIN [DIR]` mirrors SD files to or from a laptop.
 - Home → Tools: full-text **Search** (appointments, to-dos, notes, journal, files), a scientific **Calculator** (live result while you type, `+ - * /` continues the last answer, UP recalls earlier expressions), a basic stopwatch/**Timer**, **Recurring** appointments (daily/weekly/monthly/yearly), and **Backup**/restore of `/PIM` (newest 5 kept).
 - Keyboard-first controls: arrows navigate and control games, `Enter` activates/fires/drops, and `Esc` returns.
 - SD file manager and plain-text editor for `.txt`, `.c`, `.h`, and other small text files in `/PIM`.

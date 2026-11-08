@@ -228,6 +228,15 @@ static void test_dungeon(void) {
     dungeon.cells[1][2] = '.';
     for (int i = 0; i < 80 && !dungeon.game_over; i++) pim_dungeon_move(&dungeon, PIM_RIGHT);
     CHECK(dungeon.game_over);
+    pim_dungeon_reset(&dungeon, 6);
+    memset(dungeon.enemy, 0, sizeof(dungeon.enemy));
+    dungeon.enemies = 0; dungeon.player_x = 1; dungeon.player_y = 1;
+    dungeon.cells[1][2] = '/'; dungeon.cells[1][3] = '['; dungeon.cells[1][4] = '.';
+    pim_dungeon_move(&dungeon, PIM_RIGHT); pim_dungeon_move(&dungeon, PIM_RIGHT);
+    CHECK(dungeon.attack == 1 && dungeon.defense == 1 && dungeon.cells[1][2] == '.' && dungeon.cells[1][3] == '.');
+    dungeon.enemies = 1; dungeon.enemy[0] = (pim_enemy_t){.x = 4, .y = 1, .hp = 1, .alive = true, .kind = 2};
+    pim_dungeon_move(&dungeon, PIM_RIGHT);
+    CHECK(dungeon.kills == 1 && dungeon.gold == 40);
     for (uint32_t seed = 0; seed < 40; seed++) {
         pim_dungeon_reset(&dungeon, seed);
         for (int i = 0; i < 600; i++) {
@@ -236,6 +245,61 @@ static void test_dungeon(void) {
             CHECK(dungeon.cells[dungeon.player_y][dungeon.player_x] != '#' && dungeon.health <= dungeon.max_health);
         }
     }
+}
+static void test_new_games(void) {
+    pim_snake_t snake;
+    pim_2048_t g2048;
+    pim_mines_t mines;
+    pim_snake_reset(&snake, 1);
+    snake.food_x = 11; snake.food_y = 7;
+    pim_snake_turn(&snake, PIM_LEFT); pim_snake_tick(&snake);
+    CHECK(snake.x[0] == 11 && snake.length == 4 && snake.score == 10 && !snake.game_over);
+    pim_snake_turn(&snake, PIM_UP); pim_snake_tick(&snake); pim_snake_turn(&snake, PIM_DOWN); pim_snake_tick(&snake);
+    CHECK(snake.y[0] == 5 && !snake.game_over);
+    snake.x[0] = 0; snake.pending = snake.direction = PIM_LEFT; pim_snake_tick(&snake);
+    CHECK(snake.game_over);
+    pim_snake_reset(&snake, 2);
+    snake.length = 5;
+    snake.x[0] = 5; snake.y[0] = 5; snake.x[1] = 5; snake.y[1] = 6; snake.x[2] = 6; snake.y[2] = 6;
+    snake.x[3] = 6; snake.y[3] = 5; snake.x[4] = 6; snake.y[4] = 4; snake.direction = snake.pending = PIM_UP;
+    snake.food_x = 0; snake.food_y = 0;
+    pim_snake_turn(&snake, PIM_RIGHT); pim_snake_tick(&snake);
+    CHECK(snake.game_over);
+
+    pim_2048_reset(&g2048, 3);
+    memset(g2048.cells, 0, sizeof(g2048.cells));
+    g2048.cells[0][0] = 1; g2048.cells[0][1] = 1; g2048.cells[0][2] = 1; g2048.cells[0][3] = 1;
+    CHECK(pim_2048_move(&g2048, PIM_LEFT) && g2048.cells[0][0] == 2 && g2048.cells[0][1] == 2 && g2048.score == 8);
+    memset(g2048.cells, 0, sizeof(g2048.cells));
+    g2048.cells[0][0] = 3;
+    CHECK(!pim_2048_move(&g2048, PIM_LEFT) && !pim_2048_move(&g2048, PIM_UP));
+    CHECK(pim_2048_move(&g2048, PIM_DOWN) && g2048.cells[3][0] == 3);
+    for (uint8_t y = 0; y < 4; y++) for (uint8_t x = 0; x < 4; x++) g2048.cells[y][x] = (uint8_t)(1 + (x + y) % 2 + 2 * (y % 2));
+    g2048.game_over = false;
+    CHECK(!pim_2048_move(&g2048, PIM_LEFT));
+    for (uint32_t seed = 0; seed < 30; seed++) {
+        pim_2048_reset(&g2048, seed);
+        for (int i = 0; i < 400 && !g2048.game_over; i++) pim_2048_move(&g2048, (pim_direction_t)(test_random() % 4));
+    }
+
+    pim_mines_reset(&mines, 7);
+    pim_mines_flag(&mines, 0, 0);
+    CHECK(mines.flags[0][0] & PIM_MINE_FLAGGED && pim_mines_flags_left(&mines) == PIM_MINES_COUNT - 1);
+    pim_mines_flag(&mines, 0, 0);
+    pim_mines_reveal(&mines, 8, 6);
+    {
+        unsigned total = 0;
+        for (int y = 0; y < PIM_MINES_HEIGHT; y++) for (int x = 0; x < PIM_MINES_WIDTH; x++) if (mines.flags[y][x] & PIM_MINE_MINE) total++;
+        CHECK(total == PIM_MINES_COUNT && !mines.game_over && mines.revealed >= 1 && !(mines.flags[6][8] & PIM_MINE_MINE));
+        for (int y = 0; y < PIM_MINES_HEIGHT; y++) for (int x = 0; x < PIM_MINES_WIDTH; x++)
+            if (!(mines.flags[y][x] & PIM_MINE_MINE)) pim_mines_reveal(&mines, (int8_t)x, (int8_t)y);
+        CHECK(mines.won && mines.game_over);
+    }
+    pim_mines_reset(&mines, 8);
+    pim_mines_reveal(&mines, 0, 0);
+    for (int y = 0; y < PIM_MINES_HEIGHT && !mines.game_over; y++) for (int x = 0; x < PIM_MINES_WIDTH && !mines.game_over; x++)
+        if (mines.flags[y][x] & PIM_MINE_MINE) pim_mines_reveal(&mines, (int8_t)x, (int8_t)y);
+    CHECK(mines.game_over && !mines.won);
 }
 static void test_invaders(void) {
     pim_invaders_t invaders;
@@ -432,6 +496,18 @@ static void test_web(void) {
     web_request("POST", "/todos/add", "title=Buy+milk&priority=2", true);
     CHECK(web_response.status == 303 && database.todo_count == 1 && database.todos[0].priority == PIM_PRIORITY_HIGH);
     web_request("POST", "/todos/add", "title=&priority=1", true); CHECK(web_response.status == 400);
+    web_request("POST", "/todos/add", "title=Due+it&priority=1&due=31-02-2026", true); CHECK(web_response.status == 400);
+    web_request("POST", "/todos/add", "title=Due+it&priority=1&due=05-03-2026", true);
+    CHECK(web_response.status == 303 && database.todo_count == 2);
+    web_request("GET", "/todos", "", true); CHECK(strstr(web_out, "(due 05-03-2026)"));
+    {
+        size_t due_list[4];
+        CHECK(pim_todos_due_by(&database, (pim_date_t){2026, 3, 4}, due_list, 4) == 0);
+        CHECK(pim_todos_due_by(&database, (pim_date_t){2026, 3, 5}, due_list, 4) == 1 && strcmp(database.todos[due_list[0]].title, "Due it") == 0);
+        pim_toggle_todo(&database, due_list[0]);
+        CHECK(pim_todos_due_by(&database, (pim_date_t){2027, 1, 1}, due_list, 4) == 0);
+        for (size_t i = 0; i < database.todo_count; i++) if (strcmp(database.todos[i].title, "Due it") == 0) { pim_delete_todo(&database, i); break; }
+    }
     snprintf(path, sizeof(path), "id=%lu", (unsigned long)database.todos[0].id);
     web_request("POST", "/todos/toggle", path, true); CHECK(database.todos[0].completed);
     web_request("GET", "/todos", "", true); CHECK(strstr(web_out, "Buy milk") && strstr(web_out, "Undo"));
@@ -468,7 +544,18 @@ static void test_web(void) {
     web_request("GET", "/file/pim.dat", "", true); CHECK(web_response.status == 400);
     web_request("GET", "/file/..%2Fx", "", true); CHECK(web_response.status == 400);
     web_request("POST", "/save", "name=wifi.cfg&text=x", true); CHECK(web_response.status == 400);
-    web_request("POST", "/save", "name=a%2Fb&text=x", true); CHECK(web_response.status == 400);
+    web_request("POST", "/save", "name=a%2F..%2Fb&text=x", true); CHECK(web_response.status == 400);
+    web_request("POST", "/save", "name=%2Fetc%2Fx&text=x", true); CHECK(web_response.status == 400);
+    web_request("POST", "/save", "name=a%2Fb%2Fc%2Fd&text=x", true); CHECK(web_response.status == 400);
+    web_request("POST", "/save", "name=games%2Fdungeon%2Fnote.txt&text=deep", true); CHECK(web_response.status == 303);
+    web_request("GET", "/files", "", true); CHECK(strstr(web_out, "[dir]") && strstr(web_out, "games"));
+    web_request("GET", "/files?dir=games%2Fdungeon", "", true); CHECK(strstr(web_out, "note.txt") && strstr(web_out, ".. up"));
+    web_request("GET", "/edit?name=games%2Fdungeon%2Fnote.txt", "", true); CHECK(strstr(web_out, "deep"));
+    web_request("GET", "/manifest", "", true); CHECK(web_response.status == 200 && strstr(web_out, "games/dungeon/note.txt 4\n"));
+    web_request("PUT", "/upload/games/up.txt", "via put", true); CHECK(web_response.status == 201);
+    web_request("GET", "/file/games/up.txt", "", true); CHECK(strcmp(web_out, "via put") == 0);
+    remove("test_web_dir/games/up.txt"); remove("test_web_dir/games/dungeon/note.txt");
+    rmdir("test_web_dir/games/dungeon"); rmdir("test_web_dir/games");
     web_request("GET", "/edit?name=theme.cfg", "", true); CHECK(web_response.status == 400);
     web_request("POST", "/upload/raw.txt", "raw body", true); CHECK(web_response.status == 201);
     web_request("GET", "/file/raw.txt", "", true); CHECK(web_response.length == 8 && strcmp(web_out, "raw body") == 0);
@@ -508,7 +595,7 @@ static void test_web(void) {
     }
     rmdir("test_web_dir");
 }
-static void test_games(void) { test_tetris(); test_dungeon(); test_invaders(); test_solitaire(); }
+static void test_games(void) { test_tetris(); test_dungeon(); test_new_games(); test_invaders(); test_solitaire(); }
 static void test_telnet(void) {
     static pim_term_t term;
     uint8_t reply[32];

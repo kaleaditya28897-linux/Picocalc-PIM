@@ -27,7 +27,7 @@ static bool make_directory(const char *path) {
 bool pim_games_prepare(const char *root) {
     char path[160];
     bool ok = true;
-    static const char *const games[] = {"tetris", "dungeon", "invaders", "solitaire"};
+    static const char *const games[] = {"tetris", "dungeon", "invaders", "solitaire", "snake", "2048", "mines"};
     snprintf(path, sizeof(path), "%s/games", root);
     ok = make_directory(path);
     for (size_t i = 0; ok && i < sizeof(games) / sizeof(games[0]); i++) {

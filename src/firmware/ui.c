@@ -20,7 +20,7 @@
 #include "pim/tools.h"
 #include "pim/wifi.h"
 
-typedef enum { GAME_NONE, GAME_TETRIS, GAME_DUNGEON, GAME_INVADERS, GAME_SOLITAIRE } game_t;
+typedef enum { GAME_NONE, GAME_TETRIS, GAME_DUNGEON, GAME_INVADERS, GAME_SOLITAIRE, GAME_SNAKE, GAME_2048, GAME_MINES } game_t;
 
 #define FILE_LIST_MAX 32
 #define FILE_NAME_MAX 48
@@ -43,6 +43,9 @@ typedef struct {
     pim_dungeon_t dungeon;
     pim_invaders_t invaders;
     pim_solitaire_t solitaire;
+    pim_snake_t snake;
+    pim_2048_t g2048;
+    pim_mines_t mines;
     bool terminal;
     uint8_t cursor_col, cursor_row, cursor_depth, sel_index, sel_count;
     pim_solitaire_zone_t sel_zone;
@@ -65,6 +68,11 @@ static const theme_t themes[] = {
     {"Amber", 0xffb000, 0x805800, 0x302100, 0x000000},
     {"Green", 0x33ff33, 0x1a801a, 0x0a330a, 0x000000},
     {"Manila", 0x000000, 0x837b62, 0xd2c59d, 0xefe0b3},
+    {"Cyan", 0x40e0ff, 0x207080, 0x0c2a30, 0x000000},
+    {"Violet", 0xc080ff, 0x604080, 0x251830, 0x000000},
+    {"Red", 0xff4040, 0x802020, 0x300c0c, 0x000000},
+    {"Mono", 0xe0e0e0, 0x707070, 0x2a2a2a, 0x000000},
+    {"Paper", 0x1a1a1a, 0x868686, 0xd6d6d6, 0xf2f2f2},
 };
 #define THEME_COUNT (sizeof(themes) / sizeof(themes[0]))
 #define TODAY_FILE PIM_ROOT "/today.cfg"
@@ -86,6 +94,7 @@ static bool today_save(void);
 static void date_picker(lv_event_t *event);
 static void appointment_details(lv_event_t *event);
 static void todos(lv_event_t *event);
+static void today_screen(lv_event_t *event);
 static void todo_list(lv_event_t *event);
 static void notes(lv_event_t *event);
 static void theme_screen(lv_event_t *event);
@@ -94,6 +103,7 @@ static void journal(lv_event_t *event);
 static void journal_list(lv_event_t *event);
 static void tetris(lv_event_t *event);
 static void dungeon(lv_event_t *event);
+static void games_screen(lv_event_t *event);
 static void invaders(lv_event_t *event);
 static void solitaire(lv_event_t *event);
 static void file_list(lv_event_t *event);
@@ -305,7 +315,7 @@ static void sound_toggle(lv_event_t *event) {
 }
 static void home(lv_event_t *event) {
     lv_obj_t *first; (void)event; clear();
-    label("PicoCalc PIM", 102, 2);
+    label("PicoDeck OS", 105, 2);
     first = button("Calendar", 10, 22, 145, home_calendar, NULL);
     button("To-Do List", 165, 22, 145, todos, NULL);
     button("Notes", 10, 52, 145, notes, NULL);
@@ -314,20 +324,28 @@ static void home(lv_event_t *event) {
     button("Text editor", 165, 82, 145, new_file, NULL);
     button("Tools", 10, 112, 145, tools_screen, NULL);
     button("Wi-Fi & web", 165, 112, 145, wifi, NULL);
-    button("Tetris", 10, 142, 145, tetris, NULL);
-    button("Dungeon RPG", 165, 142, 145, dungeon, NULL);
-    button("Space Invaders", 10, 172, 145, invaders, NULL);
-    button("Solitaire", 165, 172, 145, solitaire, NULL);
-    button("Theme", 10, 202, 145, theme_screen, NULL);
-    button("Telnet (BBS)", 165, 202, 145, telnet, NULL);
-    sound_button = button(pim_sound_enabled() ? "Sound: ON" : "Sound: OFF", 10, 232, 145, sound_toggle, NULL);
-    label("ARROWS select ENTER open ESC home", 8, 268);
-    ui.clock_obj = label("", 0, 284);
-    lv_obj_set_width(ui.clock_obj, 320);
-    lv_obj_set_style_text_align(ui.clock_obj, LV_TEXT_ALIGN_CENTER, 0);
-    ui.battery_obj = label("Battery: ...", 0, 300);
-    lv_obj_set_width(ui.battery_obj, 320);
-    lv_obj_set_style_text_align(ui.battery_obj, LV_TEXT_ALIGN_CENTER, 0);
+    button("Today", 10, 142, 145, today_screen, NULL);
+    button("Games", 165, 142, 145, games_screen, NULL);
+    button("Theme", 10, 172, 145, theme_screen, NULL);
+    button("Telnet (BBS)", 165, 172, 145, telnet, NULL);
+    sound_button = button(pim_sound_enabled() ? "Sound: ON" : "Sound: OFF", 10, 202, 145, sound_toggle, NULL);
+    {
+        lv_obj_t *rule = lv_obj_create(lv_screen_active());
+        lv_obj_t *hint = label("Arrows move  Enter open  Esc home", 0, 282);
+        lv_obj_t *credit = label("Created by Aditya Kale", 0, 298);
+        lv_obj_set_size(rule, 300, 1); lv_obj_set_pos(rule, 10, 238);
+        lv_obj_set_style_bg_opa(rule, LV_OPA_COVER, 0); lv_obj_set_style_border_width(rule, 0, 0);
+        lv_obj_set_style_pad_all(rule, 0, 0); lv_obj_set_style_radius(rule, 0, 0);
+        lv_obj_set_style_bg_color(rule, lv_color_hex(CRT_AMBER), 0);
+        lv_obj_remove_flag(rule, LV_OBJ_FLAG_SCROLLABLE);
+        ui.clock_obj = label("", 0, 246);
+        ui.battery_obj = label("Battery: ...", 0, 263);
+        lv_obj_t *centered[] = {hint, credit, ui.clock_obj, ui.battery_obj};
+        for (size_t i = 0; i < 4; i++) {
+            lv_obj_set_width(centered[i], 320);
+            lv_obj_set_style_text_align(centered[i], LV_TEXT_ALIGN_CENTER, 0);
+        }
+    }
     battery_refresh(NULL);
     ui.timer = lv_timer_create(battery_refresh, 15000, NULL);
     focus(first);
@@ -553,6 +571,11 @@ static void save_todo(lv_event_t *event) {
     pim_todo_t value = {0}; (void)event;
     snprintf(value.title, sizeof(value.title), "%s", lv_textarea_get_text(ui.title));
     value.priority = (pim_priority_t)lv_dropdown_get_selected(ui.choice); value.created_at = now();
+    {
+        static const int offset[] = {-1, 0, 1, 3, 7, 14};
+        uint32_t pick = lv_dropdown_get_selected(ui.fld_obj[0]);
+        if (pick > 0 && pick < sizeof(offset) / sizeof(offset[0])) pim_todo_set_due(&value, pim_date_shift(current_today(), offset[pick]));
+    }
     if (!pim_add_todo(ui.database, &value)) { message("Not saved", "Add a title or remove an old record."); return; }
     save(); todos(NULL);
 }
@@ -561,8 +584,10 @@ static void toggle_todo(lv_event_t *event) { pim_toggle_todo(ui.database, index_
 static void delete_todo(lv_event_t *event) { pim_delete_todo(ui.database, index_from_event(event)); save(); todo_list(NULL); }
 static void todo_detail(lv_event_t *event) {
     ui.selected = index_from_event(event); pim_todo_t *value = &ui.database->todos[ui.selected]; char detail[128]; lv_obj_t *first; clear();
-    snprintf(detail, sizeof(detail), "%s\nPriority: %s\nStatus: %s", value->title, pim_priority_name(value->priority),
-             value->completed ? "Complete" : "Pending");
+    pim_date_t due; char due_text[24] = "none";
+    if (pim_todo_due(value, &due)) format_date(due_text, sizeof(due_text), due);
+    snprintf(detail, sizeof(detail), "%s\nPriority: %s\nDue: %s\nStatus: %s", value->title, pim_priority_name(value->priority),
+             due_text, value->completed ? "Complete" : "Pending");
     label(detail, 20, 50);
     first = button(value->completed ? "Mark pending" : "Mark complete", 18, 242, 125, toggle_todo,
                    (void *)(uintptr_t)(ui.selected + 1));
@@ -575,8 +600,10 @@ static void todo_list(lv_event_t *event) {
     list = lv_list_create(lv_screen_active()); lv_obj_set_pos(list, 8, 30); lv_obj_set_size(list, 304, 246); crt_style(list, true);
     for (size_t i = 0; i < ui.database->todo_count; i++) {
         pim_todo_t *value = &ui.database->todos[i]; char row[96];
-        snprintf(row, sizeof(row), "%s %s [%s]", value->completed ? "[x]" : "[ ]", value->title,
-                 pim_priority_name(value->priority));
+        pim_date_t due; char due_text[16] = "";
+        if (pim_todo_due(value, &due)) snprintf(due_text, sizeof(due_text), " %02u-%02u", due.day, due.month);
+        snprintf(row, sizeof(row), "%s %s [%s]%s", value->completed ? "[x]" : "[ ]", value->title,
+                 pim_priority_name(value->priority), due_text);
         lv_obj_t *item = lv_list_add_button(list, NULL, row);
         lv_obj_add_event_cb(item, todo_detail, LV_EVENT_CLICKED, (void *)(uintptr_t)(i + 1)); style_list_item(item);
     }
@@ -587,6 +614,9 @@ static void todos(lv_event_t *event) {
     ui.title = text("Task", 12, 48, 296, 32, true); ui.choice = lv_dropdown_create(lv_screen_active());
     lv_dropdown_set_options(ui.choice, "Low\nNormal\nHigh"); lv_dropdown_set_selected(ui.choice, PIM_PRIORITY_NORMAL, LV_ANIM_OFF); crt_dropdown(ui.choice);
     lv_obj_set_pos(ui.choice, 12, 94); lv_obj_set_size(ui.choice, 140, 32);
+    ui.fld_obj[0] = lv_dropdown_create(lv_screen_active());
+    lv_dropdown_set_options(ui.fld_obj[0], "No due date\nToday\nTomorrow\nIn 3 days\nIn a week\nIn 2 weeks"); crt_dropdown(ui.fld_obj[0]);
+    lv_obj_set_pos(ui.fld_obj[0], 160, 94); lv_obj_set_size(ui.fld_obj[0], 148, 32);
     first = button("Add", 12, 148, 90, save_todo, NULL);
     button("View", 116, 148, 90, todo_list, NULL); button("Back", 220, 148, 90, home, NULL); focus(first);
 }
@@ -1218,6 +1248,43 @@ static size_t recur_count;
 static void recur_reload(void) { recur_count = pim_recur_load(PIM_ROOT, recur, PIM_RECUR_MAX); }
 static void recur_detail(lv_event_t *event);
 static void recur_add(lv_event_t *event);
+/* Today: this day's appointments (including recurring ones) and open to-dos that are due or overdue. */
+static void today_screen(lv_event_t *event) {
+    pim_date_t today = current_today();
+    size_t indices[PIM_MAX_TODOS];
+    char *text = ui.file_text;
+    size_t used = 0, count;
+    lv_obj_t *first, *view;
+    (void)event; clear();
+    recur_reload();
+    text[0] = '\0';
+#define TODAY_ADD(...) do { if (used < 900) used += (size_t)snprintf(text + used, sizeof(ui.file_text) - used, __VA_ARGS__); } while (0)
+    TODAY_ADD("Appointments\n");
+    count = pim_appointments_on(ui.database, today, indices, PIM_MAX_APPOINTMENTS);
+    for (size_t i = 0; i < count; i++) {
+        const pim_appointment_t *item = &ui.database->appointments[indices[i]];
+        TODAY_ADD(" %02u:%02u %s\n", item->minutes / 60, item->minutes % 60, item->title);
+    }
+    for (size_t i = 0; i < recur_count; i++)
+        if (pim_recur_occurs(&recur[i], today)) { count++; TODAY_ADD(" %02u:%02u %s (%s)\n", recur[i].minutes / 60, recur[i].minutes % 60, recur[i].title, pim_recur_name(recur[i].freq)); }
+    if (count == 0) TODAY_ADD(" none\n");
+    TODAY_ADD("\nTo-dos due\n");
+    count = pim_todos_due_by(ui.database, today, indices, PIM_MAX_TODOS);
+    for (size_t i = 0; i < count; i++) {
+        const pim_todo_t *item = &ui.database->todos[indices[i]];
+        pim_date_t due;
+        pim_todo_due(item, &due);
+        TODAY_ADD(" %s%s\n", pim_date_compare(due, today) < 0 ? "! " : "", item->title);
+    }
+    if (count == 0) TODAY_ADD(" none\n");
+#undef TODAY_ADD
+    label("Today", 130, 4);
+    view = label(text, 10, 26);
+    lv_obj_set_width(view, 300);
+    lv_label_set_long_mode(view, LV_LABEL_LONG_CLIP);
+    first = button("Back", 112, 284, 95, home, NULL);
+    focus(first);
+}
 static void recur_open(lv_event_t *event) { ui.selected = index_from_event(event); recur_detail(NULL); }
 static void recur_remove(lv_event_t *event) {
     (void)event;
@@ -1379,7 +1446,7 @@ static void tz_text(char *out, size_t size) {
 static void wifi_ready_message(const char *address) {
     snprintf(ui.file_text, sizeof(ui.file_text),
              "Open http://%s:8080\nin a phone or PC browser.\nPIN: %s\n\n"
-             "curl -H 'Cookie: pim=%s' \\\n -T file http://%s:8080/upload/name\n\n"
+             "curl -H 'Cookie: pim=%s' \\\n --data-binary @file http://%s:8080/upload/name\n\n"
              "Use a trusted network (plain HTTP).",
              address, pim_wifi_pin(), pim_wifi_pin(), address);
     message("Wi-Fi ready", ui.file_text);
@@ -1806,6 +1873,9 @@ static void game_sounds(void) {
         now_over = ui.dungeon.game_over; now_won = ui.dungeon.won; now_gold = ui.dungeon.gold; now_kills = ui.dungeon.kills;
         now_floor = ui.dungeon.floor; now_health = ui.dungeon.health;
     } else if (ui.game == GAME_SOLITAIRE) { now_won = ui.solitaire.won; now_moves = ui.solitaire.moves; }
+    else if (ui.game == GAME_SNAKE) { now_over = ui.snake.game_over && !ui.snake.won; now_won = ui.snake.won; now_score = ui.snake.score; }
+    else if (ui.game == GAME_2048) { now_over = ui.g2048.game_over; now_score = (uint16_t)(ui.g2048.score > 65535 ? 65535 : ui.g2048.score); now_won = ui.g2048.won; }
+    else if (ui.game == GAME_MINES) { now_over = ui.mines.game_over && !ui.mines.won; now_won = ui.mines.won; now_moves = ui.mines.revealed; }
     if (now_over && !over) pim_sound_play(PIM_SOUND_GAME_OVER);
     else if (now_won && !won) pim_sound_play(PIM_SOUND_WIN);
     else if (now_level > level && level > 0) pim_sound_play(PIM_SOUND_LEVEL_UP);
@@ -1821,7 +1891,8 @@ static void game_sounds(void) {
 }
 static void game_redraw(void) {
     bool ended = ui.game == GAME_TETRIS ? ui.tetris.game_over : ui.game == GAME_INVADERS ? ui.invaders.game_over :
-                 ui.game == GAME_DUNGEON ? ui.dungeon.game_over || ui.dungeon.won : ui.game == GAME_SOLITAIRE ? ui.solitaire.won : false;
+                 ui.game == GAME_DUNGEON ? ui.dungeon.game_over || ui.dungeon.won : ui.game == GAME_SOLITAIRE ? ui.solitaire.won :
+                 ui.game == GAME_SNAKE ? ui.snake.game_over : ui.game == GAME_2048 ? ui.g2048.game_over : ui.game == GAME_MINES ? ui.mines.game_over : false;
     if (!ended) { score_saved = false; score_rank = 0; }
     game_sounds(); if (ui.board != NULL) lv_obj_invalidate(ui.board); }
 
@@ -1900,14 +1971,18 @@ static void draw_dungeon(void) {
         else gfill(px + 9, py + 9, 2, 2, G_DARK);
         if (cell == '>') { gframe(px + 2, py + 2, 16, 16, 2, G_AMBER); gtext(">", px, py + 1, D_TILE, LV_TEXT_ALIGN_CENTER, G_AMBER, font_mid); }
         else if (cell == '$') { gcircle(px + 4, py + 4, 12, G_AMBER); gcircle(px + 7, py + 7, 6, G_BLACK); }
+        else if (cell == '/') { gfill(px + 9, py + 2, 3, 12, G_AMBER); gfill(px + 5, py + 13, 11, 2, G_AMBER); gfill(px + 9, py + 15, 3, 3, G_DIM); }
+        else if (cell == '[') { gframe(px + 4, py + 3, 12, 14, 2, G_AMBER); gfill(px + 9, py + 6, 2, 8, G_DIM); }
         else if (cell == '!') { gfill(px + 8, py + 2, 4, 4, G_AMBER); gframe(px + 5, py + 6, 10, 12, 2, G_AMBER); gfill(px + 7, py + 11, 6, 5, G_DIM); }
     }
     for (int i = 0; i < PIM_DUNGEON_MAX_ENEMIES; i++) {
         const pim_enemy_t *e = &d->enemy[i];
         int px = e->x * D_TILE, py = e->y * D_TILE;
         if (!e->alive) continue;
-        gfill(px + 3, py + 4, 14, 14, G_DIM); gframe(px + 3, py + 4, 14, 14, 1, G_AMBER);
-        gfill(px + 6, py + 8, 3, 3, G_AMBER); gfill(px + 11, py + 8, 3, 3, G_AMBER); gfill(px + 6, py + 14, 8, 2, G_BLACK);
+        if (e->kind == 2) { gfill(px + 1, py + 1, 18, 18, G_DIM); gframe(px + 1, py + 1, 18, 18, 2, G_AMBER); gfill(px + 4, py + 2, 3, 3, G_AMBER); gfill(px + 13, py + 2, 3, 3, G_AMBER); }
+        else if (e->kind == 1) { gfill(px + 3, py + 4, 14, 14, G_AMBER); gfill(px + 3, py + 2, 3, 3, G_AMBER); gfill(px + 14, py + 2, 3, 3, G_AMBER); }
+        else { gfill(px + 3, py + 4, 14, 14, G_DIM); gframe(px + 3, py + 4, 14, 14, 1, G_AMBER); }
+        gfill(px + 6, py + 8, 3, 3, e->kind == 1 ? G_BLACK : G_AMBER); gfill(px + 11, py + 8, 3, 3, e->kind == 1 ? G_BLACK : G_AMBER); gfill(px + 6, py + 14, 8, 2, G_BLACK);
         for (int pip = 0; pip < e->hp && pip < 6; pip++) gfill(px + 3 + pip * 3, py + 1, 2, 2, G_AMBER);
     }
     gcircle(d->player_x * D_TILE + 3, d->player_y * D_TILE + 3, 14, G_AMBER);
@@ -1921,7 +1996,7 @@ static void draw_dungeon(void) {
     gtext(text, 168, 250, 60, LV_TEXT_ALIGN_LEFT, G_AMBER, font_mid);
     snprintf(text, sizeof(text), "FLOOR %u/%u", d->floor, d->floors);
     gtext(text, 232, 250, 84, LV_TEXT_ALIGN_LEFT, G_AMBER, font_mid);
-    snprintf(text, sizeof(text), "GOLD %u   KILLS %u   FOES %u", d->gold, d->kills, d->enemies);
+    snprintf(text, sizeof(text), "GOLD %u KILLS %u FOES %u ATK+%u DEF+%u", d->gold, d->kills, d->enemies, d->attack, d->defense);
     gtext(text, 8, 272, 304, LV_TEXT_ALIGN_LEFT, G_AMBER, font_mid);
     gtext(d->message, 8, 292, 150, LV_TEXT_ALIGN_LEFT, G_AMBER, font_mid);
     gtext("Move into foes to fight", 150, 281, 166, LV_TEXT_ALIGN_RIGHT, G_DIM, font_small);
@@ -1930,6 +2005,82 @@ static void draw_dungeon(void) {
     if (d->won) gover("YOU ESCAPED!", "ENTER to play again", 160, 120, "dungeon", d->gold + d->kills * 10U);
     snprintf(game_status, sizeof(game_status), "Dungeon floor %u HP %u gold %u%s%s", d->floor, d->health, d->gold,
              d->game_over ? " DEFEATED" : "", d->won ? " VICTORY" : "");
+}
+
+/* Snake: 20x15 grid of 16 px. */
+static void draw_snake(void) {
+    const pim_snake_t *g = &ui.snake;
+    char text[40];
+    gframe(0, 0, 320, 240, 2, G_AMBER);
+    gcircle(g->food_x * 16 + 2, g->food_y * 16 + 2, 12, G_AMBER);
+    gcircle(g->food_x * 16 + 6, g->food_y * 16 + 6, 4, G_BLACK);
+    for (uint16_t i = g->length; i > 0; i--) {
+        int px = g->x[i - 1] * 16, py = g->y[i - 1] * 16;
+        gfill(px + 1, py + 1, 14, 14, i == 1 ? G_AMBER : G_DIM);
+        if (i == 1) { gfill(px + 4, py + 5, 3, 3, G_BLACK); gfill(px + 9, py + 5, 3, 3, G_BLACK); }
+    }
+    snprintf(text, sizeof(text), "SCORE %u   LENGTH %u", g->score, g->length);
+    gtext(text, 8, 250, 304, LV_TEXT_ALIGN_LEFT, G_AMBER, font_mid);
+    gtext("ARROWS steer", 8, 276, 150, LV_TEXT_ALIGN_LEFT, G_DIM, font_small);
+    gtext("ESC quit", 8, 296, 150, LV_TEXT_ALIGN_LEFT, G_DIM, font_small);
+    if (g->game_over) gover(g->won ? "YOU WIN!" : "GAME OVER", "ENTER to play again", 160, 120, "snake", g->score);
+    snprintf(game_status, sizeof(game_status), "Snake score %u length %u%s", g->score, g->length, g->game_over ? " GAME OVER" : "");
+}
+
+/* 2048: 4x4 tiles of 64 px. */
+static void draw_2048(void) {
+    const pim_2048_t *g = &ui.g2048;
+    char text[40];
+    int best = 0;
+    for (int y = 0; y < 4; y++) for (int x = 0; x < 4; x++) {
+        int px = 24 + x * 68, py = 8 + y * 68, e = g->cells[y][x];
+        if (e > best) best = e;
+        if (e == 0) { gframe(px, py, 64, 64, 1, G_DARK); continue; }
+        gfill(px, py, 64, 64, e < 4 ? G_DARK : e < 7 ? G_DIM : G_AMBER);
+        gframe(px, py, 64, 64, 1, G_AMBER);
+        snprintf(text, sizeof(text), "%u", 1u << e);
+        gtext(text, px, py + 24, 64, LV_TEXT_ALIGN_CENTER, e < 7 ? G_AMBER : G_BLACK, font_big);
+    }
+    snprintf(text, sizeof(text), "SCORE %u   BEST TILE %u", (unsigned)g->score, best ? 1u << best : 0u);
+    gtext(text, 8, 286, 304, LV_TEXT_ALIGN_LEFT, G_AMBER, font_mid);
+    gtext("ARROWS slide  ESC quit", 8, 302, 304, LV_TEXT_ALIGN_LEFT, G_DIM, font_small);
+    if (g->game_over) gover("NO MOVES", "ENTER to play again", 160, 140, "2048", g->score);
+    snprintf(game_status, sizeof(game_status), "2048 score %u best %u%s%s", (unsigned)g->score, best ? 1u << best : 0u,
+             g->won ? " REACHED2048" : "", g->game_over ? " GAME OVER" : "");
+}
+
+/* Minesweeper: 16x12 cells of 18 px. */
+static uint32_t mines_start_ms;
+static void draw_mines(void) {
+    const pim_mines_t *g = &ui.mines;
+    char text[40];
+    for (int y = 0; y < PIM_MINES_HEIGHT; y++) for (int x = 0; x < PIM_MINES_WIDTH; x++) {
+        int px = 16 + x * 18, py = 4 + y * 18;
+        uint8_t f = g->flags[y][x];
+        if (f & PIM_MINE_REVEALED) {
+            gframe(px, py, 18, 18, 1, G_DARK);
+            if (f & PIM_MINE_MINE) { gcircle(px + 4, py + 4, 10, G_AMBER); }
+            else if (pim_mines_around(g, (int8_t)x, (int8_t)y) > 0) {
+                snprintf(text, sizeof(text), "%u", pim_mines_around(g, (int8_t)x, (int8_t)y));
+                gtext(text, px, py + 1, 18, LV_TEXT_ALIGN_CENTER, G_AMBER, font_mid);
+            }
+        } else {
+            gfill(px + 1, py + 1, 16, 16, G_DIM); gframe(px, py, 18, 18, 1, G_DARK);
+            if (f & PIM_MINE_FLAGGED) gtext("F", px, py + 1, 18, LV_TEXT_ALIGN_CENTER, G_BLACK, font_mid);
+        }
+    }
+    gframe(16 + g->cursor_x * 18, 4 + g->cursor_y * 18, 18, 18, 2, G_AMBER);
+    snprintf(text, sizeof(text), "MINES LEFT %u", pim_mines_flags_left(g));
+    gtext(text, 8, 232, 304, LV_TEXT_ALIGN_LEFT, G_AMBER, font_mid);
+    gtext("ENTER open   F flag", 8, 262, 304, LV_TEXT_ALIGN_LEFT, G_DIM, font_small);
+    gtext("ESC quit", 8, 278, 304, LV_TEXT_ALIGN_LEFT, G_DIM, font_small);
+    if (g->game_over) {
+        uint32_t seconds = (to_ms_since_boot(get_absolute_time()) - mines_start_ms) / 1000;
+        if (!g->won) score_saved = true;
+        gover(g->won ? "CLEARED!" : "BOOM!", "ENTER to play again", 160, 120, "mines", seconds > 9999 ? 1 : 10000 - seconds);
+    }
+    snprintf(game_status, sizeof(game_status), "Mines left %u revealed %u%s%s", pim_mines_flags_left(g), g->revealed,
+             g->won ? " CLEARED" : "", g->game_over && !g->won ? " BOOM" : "");
 }
 
 /* Space Invaders: 20x16 grid of 16 px with pixel-art sprites. */
@@ -2062,6 +2213,9 @@ static void board_draw(lv_event_t *event) {
     else if (ui.game == GAME_DUNGEON) draw_dungeon();
     else if (ui.game == GAME_INVADERS) draw_invaders();
     else if (ui.game == GAME_SOLITAIRE) draw_solitaire();
+    else if (ui.game == GAME_SNAKE) draw_snake();
+    else if (ui.game == GAME_2048) draw_2048();
+    else if (ui.game == GAME_MINES) draw_mines();
 }
 
 static void solitaire_clear_selection(void) { ui.sel_active = false; ui.cursor_depth = 1; }
@@ -2153,6 +2307,30 @@ static void game_key(lv_event_t *event) {
         else if (key == LV_KEY_ENTER || key == LV_KEY_UP || key == ' ' || key == 'w') pim_invaders_fire(&ui.invaders);
     } else if (ui.game == GAME_SOLITAIRE) {
         solitaire_key(key);
+    } else if (ui.game == GAME_SNAKE) {
+        if (ui.snake.game_over) { if (key == LV_KEY_ENTER) { pim_snake_reset(&ui.snake, to_ms_since_boot(get_absolute_time())); lv_timer_set_period(ui.timer, pim_snake_interval_ms(&ui.snake)); } }
+        else if (key == LV_KEY_UP || key == 'w') pim_snake_turn(&ui.snake, PIM_UP);
+        else if (key == LV_KEY_DOWN || key == 's') pim_snake_turn(&ui.snake, PIM_DOWN);
+        else if (key == LV_KEY_LEFT || key == 'a') pim_snake_turn(&ui.snake, PIM_LEFT);
+        else if (key == LV_KEY_RIGHT || key == 'd') pim_snake_turn(&ui.snake, PIM_RIGHT);
+    } else if (ui.game == GAME_2048) {
+        if (key == LV_KEY_UP || key == 'w') pim_2048_move(&ui.g2048, PIM_UP);
+        else if (key == LV_KEY_DOWN || key == 's') pim_2048_move(&ui.g2048, PIM_DOWN);
+        else if (key == LV_KEY_LEFT || key == 'a') pim_2048_move(&ui.g2048, PIM_LEFT);
+        else if (key == LV_KEY_RIGHT || key == 'd') pim_2048_move(&ui.g2048, PIM_RIGHT);
+        else if (key == LV_KEY_ENTER && ui.g2048.game_over) pim_2048_reset(&ui.g2048, to_ms_since_boot(get_absolute_time()));
+    } else if (ui.game == GAME_MINES) {
+        pim_mines_t *m = &ui.mines;
+        if (m->game_over) { if (key == LV_KEY_ENTER) { pim_mines_reset(m, to_ms_since_boot(get_absolute_time())); mines_start_ms = to_ms_since_boot(get_absolute_time()); } }
+        else if (key == LV_KEY_UP || key == 'w') pim_mines_move_cursor(m, 0, -1);
+        else if (key == LV_KEY_DOWN || key == 's') pim_mines_move_cursor(m, 0, 1);
+        else if (key == LV_KEY_LEFT || key == 'a') pim_mines_move_cursor(m, -1, 0);
+        else if (key == LV_KEY_RIGHT || key == 'd') pim_mines_move_cursor(m, 1, 0);
+        else if (key == 'f' || key == 'F') pim_mines_flag(m, m->cursor_x, m->cursor_y);
+        else if (key == LV_KEY_ENTER || key == ' ') {
+            if (!m->placed) mines_start_ms = to_ms_since_boot(get_absolute_time());
+            pim_mines_reveal(m, m->cursor_x, m->cursor_y);
+        }
     }
     game_redraw();
 }
@@ -2160,6 +2338,7 @@ static void game_tick(lv_timer_t *timer) {
     (void)timer;
     if (ui.game == GAME_TETRIS && !ui.tetris.game_over) pim_tetris_move(&ui.tetris, 0, 1);
     else if (ui.game == GAME_INVADERS && !ui.invaders.game_over) pim_invaders_tick(&ui.invaders);
+    else if (ui.game == GAME_SNAKE && !ui.snake.game_over) { pim_snake_tick(&ui.snake); lv_timer_set_period(ui.timer, pim_snake_interval_ms(&ui.snake)); }
     else return;
     game_redraw();
 }
@@ -2181,6 +2360,9 @@ static void start_game(game_t game) {
     if (game == GAME_TETRIS) { pim_tetris_reset(&ui.tetris, seed); ui.timer = lv_timer_create(game_tick, pim_tetris_interval_ms(&ui.tetris), NULL); }
     else if (game == GAME_DUNGEON) pim_dungeon_reset(&ui.dungeon, seed);
     else if (game == GAME_INVADERS) { pim_invaders_reset(&ui.invaders, seed); ui.timer = lv_timer_create(game_tick, pim_invaders_interval_ms(&ui.invaders), NULL); }
+    else if (game == GAME_SNAKE) { pim_snake_reset(&ui.snake, seed); ui.timer = lv_timer_create(game_tick, pim_snake_interval_ms(&ui.snake), NULL); }
+    else if (game == GAME_2048) pim_2048_reset(&ui.g2048, seed);
+    else if (game == GAME_MINES) { pim_mines_reset(&ui.mines, seed); mines_start_ms = to_ms_since_boot(get_absolute_time()); }
     else {
         pim_solitaire_new(&ui.solitaire, seed);
         ui.sel_active = false; ui.cursor_row = 0; ui.cursor_col = 0; ui.cursor_depth = 1; ui.sol_message[0] = '\0';
@@ -2192,6 +2374,23 @@ static void tetris(lv_event_t *event) { (void)event; start_game(GAME_TETRIS); }
 static void dungeon(lv_event_t *event) { (void)event; start_game(GAME_DUNGEON); }
 static void invaders(lv_event_t *event) { (void)event; start_game(GAME_INVADERS); }
 static void solitaire(lv_event_t *event) { (void)event; start_game(GAME_SOLITAIRE); }
+static void snake(lv_event_t *event) { (void)event; start_game(GAME_SNAKE); }
+static void game_2048(lv_event_t *event) { (void)event; start_game(GAME_2048); }
+static void minesweeper(lv_event_t *event) { (void)event; start_game(GAME_MINES); }
+static void games_screen(lv_event_t *event) {
+    lv_obj_t *first; (void)event; clear();
+    label("Games", 135, 8);
+    first = button("Tetris", 10, 40, 145, tetris, NULL);
+    button("Dungeon RPG", 165, 40, 145, dungeon, NULL);
+    button("Space Invaders", 10, 80, 145, invaders, NULL);
+    button("Solitaire", 165, 80, 145, solitaire, NULL);
+    button("Snake", 10, 120, 145, snake, NULL);
+    button("Minesweeper", 165, 120, 145, minesweeper, NULL);
+    button("2048", 10, 160, 145, game_2048, NULL);
+    button("Back", 165, 160, 145, home, NULL);
+    label("Top scores are saved on the SD card", 20, 215);
+    focus(first);
+}
 
 static void theme_load(void) {
     char name[16] = "";
@@ -2221,14 +2420,14 @@ static void theme_screen(lv_event_t *event) {
     clear();
     label("Theme", 138, 8);
     for (size_t i = 0; i < THEME_COUNT; i++) {
-        button(themes[i].name, 60, 40 + (int)i * 36, 200, theme_pick, (void *)(uintptr_t)(i + 1));
+        button(themes[i].name, i % 2 ? 165 : 10, 36 + (int)(i / 2) * 34, 145, theme_pick, (void *)(uintptr_t)(i + 1));
     }
     {
         char current[32];
         snprintf(current, sizeof(current), "Current: %s", themes[theme_index].name);
-        label(current, 100, 150);
+        label(current, 100, 190);
     }
-    label("Saved to /PIM/theme.cfg", 66, 170);
+    label("Saved to /PIM/theme.cfg", 66, 210);
     button("Back", 10, 262, 90, home, NULL);
     focus(lv_obj_get_child(lv_screen_active(), (int32_t)theme_index + 1));
 }
@@ -2450,10 +2649,42 @@ static void web_changed(void) {
     if (ui.date_origin != 2 && ui.game == GAME_NONE && !ui.terminal) home(NULL);
 }
 
+/* Critical battery: a banner on the top layer (any screen), shown once per discharge. Data is already saved after every change. */
+static lv_obj_t *low_banner;
+static bool low_timer_started;
+static bool low_warned;
+static void low_banner_remove(lv_timer_t *timer) {
+    (void)timer;
+    if (low_banner != NULL) { lv_obj_delete(low_banner); low_banner = NULL; }
+}
+static void low_battery_check(lv_timer_t *timer) {
+    pim_battery_t battery;
+    char text_value[48];
+    (void)timer;
+    if (!pim_input_battery(&battery)) return;
+    if (battery.charging || battery.percent > 15) { low_warned = false; return; }
+    if (low_warned || battery.percent > 10) return;
+    low_warned = true;
+    pim_input_activity();
+    pim_sound_play(PIM_SOUND_HURT);
+    if (low_banner != NULL) lv_obj_delete(low_banner);
+    low_banner = lv_label_create(lv_layer_top());
+    snprintf(text_value, sizeof(text_value), "LOW BATTERY %u%% - plug in", battery.percent);
+    lv_label_set_text(low_banner, text_value);
+    crt_style(low_banner, true);
+    lv_obj_set_style_pad_all(low_banner, 6, 0);
+    lv_obj_set_style_bg_opa(low_banner, LV_OPA_COVER, 0);
+    lv_obj_set_pos(low_banner, 40, 150);
+    lv_timer_set_repeat_count(lv_timer_create(low_banner_remove, 8000, NULL), 1);
+}
+
 void pim_ui_start(pim_database_t *database, const char *storage_path) {
     static const pim_wifi_hooks_t hooks = {web_today, web_changed};
     ui = (ui_t){.database = database, .storage_path = storage_path, .calendar = {2026, 1, 1}, .today = {2026, 1, 1}, .base_minutes = 540, .spin = {9, 0, 3}};
     wifi_cfg_ready = false;
+    low_banner = NULL;
+    low_warned = false;
+    if (!low_timer_started) { low_timer_started = true; lv_timer_create(low_battery_check, 10000, NULL); }
     telnet_host[0] = '\0';
     theme_load();
     sound_load();

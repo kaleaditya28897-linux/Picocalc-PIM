@@ -282,10 +282,10 @@ static void test_games(void) {
     pim_games_set_root(ROOT);
     CHECK(pim_games_prepare(ROOT) && pim_games_prepare(ROOT));
     CHECK(exists(ROOT "/games/dungeon/floor5.txt") && exists(ROOT "/games/README.txt"));
-    CHECK(pim_game_config("dungeon", "floors", &value) && value == 5);
+    CHECK(pim_game_config("dungeon", "floors", &value) && value == 8);
     CHECK(pim_game_config("dungeon", "health", &value) && value == 20);
     CHECK(!pim_game_config("dungeon", "nothing", &value));
-    for (unsigned floor = 1; floor <= 5; floor++) CHECK(pim_game_floor_text(floor, text, sizeof(text)) && strlen(text) == 12 * 17);
+    for (unsigned floor = 1; floor <= 8; floor++) CHECK(pim_game_floor_text(floor, text, sizeof(text)) && strlen(text) == 12 * 17);
     write_file(ROOT "/games/dungeon/floor1.txt", "short\n");
     CHECK(!pim_game_floor_text(1, text, sizeof(text)));
     CHECK(pim_scores_load("tetris", scores, PIM_SCORE_SLOTS) == 0);
@@ -303,7 +303,7 @@ static void test_games(void) {
     {
         pim_dungeon_t d;
         int enemies;
-        for (unsigned floor = 1; floor <= 5; floor++) { char t[300]; CHECK(pim_game_floor_text(floor, t, sizeof(t))); }
+        for (unsigned floor = 1; floor <= 8; floor++) { char t[300]; CHECK(pim_game_floor_text(floor, t, sizeof(t))); }
         write_file(ROOT "/games/dungeon/game.cfg", "floors=2\nhealth=33\n");
         pim_dungeon_reset(&d, 5);
         CHECK(d.health == 33 && d.floors == 2 && d.player_x == 1 && d.player_y == 1 && d.cells[10][14] == '>');
@@ -320,7 +320,7 @@ static void test_games(void) {
         write_file(ROOT "/games/dungeon/game.cfg", "floors=99\nhealth=1\n");
         write_file(ROOT "/games/dungeon/floor1.txt", "################\n#@#............#\n#.#............#\n#.#............#\n#.#............#\n#.#............#\n#.#............#\n#.#............#\n#.#............#\n#.#...........>#\n#.#............#\n################\n");
         pim_dungeon_reset(&d, 1);
-        CHECK(d.health == 20 && d.floors == 5);
+        CHECK(d.health == 20 && d.floors == 8);
         CHECK(d.player_x == 1 && d.player_y == 1);
     }
     pim_games_set_root(NULL);
