@@ -545,6 +545,29 @@ static void test_web(void) {
     web_request("GET", "/file/pim.dat", "", true); CHECK(web_response.status == 400);
     web_request("GET", "/file/..%2Fx", "", true); CHECK(web_response.status == 400);
     web_request("POST", "/save", "name=wifi.cfg&text=x", true); CHECK(web_response.status == 400);
+    /* The files that hold Wi-Fi passwords, saved connections and the PIN's
+       hash are never handed out, viewed in the editor or listed. */
+    {
+        static const char *const kept[] = {"wifi.cfg", "hosts.cfg", "lock.cfg"};
+        for (size_t i = 0; i < sizeof(kept) / sizeof(kept[0]); i++) {
+            char path[64], target[64];
+            snprintf(path, sizeof(path), "test_web_dir/%s", kept[i]);
+            FILE *file = fopen(path, "wb");
+            CHECK(file != NULL);
+            if (file != NULL) { fputs("secret-contents\n", file); fclose(file); }
+            snprintf(target, sizeof(target), "/file/%s", kept[i]);
+            web_request("GET", target, "", true);
+            CHECK(web_response.status != 200 && strstr(web_out, "secret-contents") == NULL);
+            snprintf(target, sizeof(target), "/edit?name=%s", kept[i]);
+            web_request("GET", target, "", true);
+            CHECK(strstr(web_out, "secret-contents") == NULL);
+            web_request("GET", "/files", "", true);
+            CHECK(strstr(web_out, kept[i]) == NULL);
+            web_request("GET", "/manifest", "", true);
+            CHECK(strstr(web_out, kept[i]) == NULL);
+            remove(path);
+        }
+    }
 
     /* SSH keys live under /PIM/ssh on the card. The server runs on plain HTTP
        behind a four-digit PIN, so it may accept a key but must never give one

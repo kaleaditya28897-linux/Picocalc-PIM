@@ -1,44 +1,395 @@
 # PicoDeck OS (PicoCalc PIM)
 
-PicoCalc PIM is a C11 firmware PDA for the ClockworkPi PicoCalc with a Raspberry Pi Pico 2 W. It uses the official PicoCalc LVGL display and keyboard drivers, stores its PDA database on a FAT32 SD card, and has an amber-on-black CRT interface.
+PicoDeck OS is C11 firmware that turns a ClockworkPi PicoCalc with a Raspberry
+Pi Pico 2 W into a pocket SSH terminal and personal organiser. It joins your
+**Tailscale** tailnet by itself, so you can SSH to any of your machines from
+anywhere you have Wi-Fi, with no relay computer in between. Around that there is
+a calendar, to-dos, notes, a journal, files, a text editor, tools and games, all
+stored on a FAT32 SD card and driven entirely from the keyboard.
 
-## Features
+- [Which firmware](#which-firmware)
+- [Getting started](#getting-started)
+- [Tailscale](#tailscale)
+- [Terminal and SSH](#terminal-and-ssh)
+- [Wi-Fi and the web PIM](#wi-fi-and-the-web-pim)
+- [Organiser, tools and games](#organiser-tools-and-games)
+- [The startup PIN](#the-startup-pin)
+- [What is on the card](#what-is-on-the-card)
+- [Building](#building)
+- [Tests](#tests)
+- [How it works, and what went wrong on the way](#how-it-works-and-what-went-wrong-on-the-way)
 
-- A combined calendar/appointment app: arrow to a day and press Enter, then pick the start hour, minute and length with UP/DOWN (no typing dates), then enter a title and notes. Days with appointments show `*`. Journal entries use the same selected day.
-- Priority to-dos, notes, and a free-text journal: one file per day (`/PIM/journal/DD-MM-YYYY.md`) edited like the text editor. Old database journals are migrated automatically.
-- Date and time entry: scroll the calendar continuously with the arrows, `,` `.` change month, `<` `>` change year, `T` jumps to today and `G` (or Go to) opens a DD-MM-YYYY picker; in the pickers you can type digits or use UP/DOWN. Set today stores the current date in `/PIM/today.cfg` (the device has no clock).
-- Theme switcher (Home → Theme): Amber, Green, Manila, Cyan, Violet, Red, Mono and Paper (light themes: Manila and Paper). The choice is saved in `/PIM/theme.cfg`.
-- Sound toggle (Home → Sound: ON/OFF): key clicks and game effects on the speakers, saved in `/PIM/sound.cfg`.
-- Startup PIN (Home → Tools → **Device PIN**): six digits, asked for before anything else is reachable. Stored salted and iterated in `/PIM/lock.cfg`, never in the clear. It keeps a person out of your calendar, notes and saved connections; it does **not** encrypt the card, so a card reader still sees everything. Three wrong tries earn a growing wait.
-- Battery saving: the backlight dims after 30 s and turns off after 2 min idle (any key wakes it, except during games); Wi-Fi powers off after 15 idle minutes or via Wi-Fi → Wi-Fi off.
-- Reliability: an 8 s hardware watchdog reboots a hung device, and large buffers no longer live on the 4 KB stack.
-- Battery monitor on Home: percentage and charging state read from the PicoCalc keyboard MCU power gauge (refreshed every 15 s; shows "no data" if unavailable). The MCU only reports a valid level when running on battery first, then plugging in USB.
-- Auto start: at boot the PicoCalc scans for a saved Wi-Fi network; if one is in range it joins, syncs the time over NTP and opens Home directly. Otherwise (or if the sync fails) it shows the manual time screen below.
-- Startup clock: without a network, every boot asks for the date and time (prefilled from the last session, cannot be skipped). The clock then runs from that moment, is shown on Home, and drives "today" in Calendar and Journal. It is saved to `/PIM/today.cfg`.
-- Seven graphical games under Home -> Games: Tetris, Dungeon RPG (8 floors, orcs, a boss, sword/armor pickups), Space Invaders, Solitaire, Snake, Minesweeper and 2048. Each has sound effects, a top-5 score table, and a folder on the SD card (`/PIM/games/<game>/`) with `game.cfg`, `scores.txt` and, for the dungeon, editable `floor1.txt`..`floor8.txt` (16x12 maps; `M` monster, `O` orc, `B` boss, `/` sword, `[` armor). Missing files are created from defaults and never overwritten; to get the new dungeon on an older card, delete `/PIM/games/dungeon/`'s files.
-- To-dos have optional due dates; Home -> Today lists today's appointments and due/overdue to-dos. A low-battery banner and sound appear at 10% or less.
-- The web server has a file browser with subfolders (up to 3 levels) and `GET /manifest`; `tools/pim-sync.sh pull|push HOST PIN [DIR]` mirrors SD files to or from a laptop.
-- Home → Tools: full-text **Search** (appointments, to-dos, notes, journal, files), a scientific **Calculator** (live result while you type, `+ - * /` continues the last answer, UP recalls earlier expressions), a basic stopwatch/**Timer**, **Recurring** appointments (daily/weekly/monthly/yearly), and **Backup**/restore of `/PIM` (newest 5 kept).
-- Keyboard-first controls: arrows navigate and control games, `Enter` activates/fires/drops, and `Esc` returns.
-- SD file manager and plain-text editor for `.txt`, `.c`, `.h`, and other small text files in `/PIM`.
-- SD file manager with folder navigation plus named-file and directory creation/deletion. The 8 px terminal editor shows 40 columns, soft-wraps long lines and pages through files of any size (Prev/Next, 4 KiB per page, edits autosaved when you change page).
-- Wi-Fi (Home → Wi-Fi & web): network scanner with on-device password entry, saved networks, NTP time sync with a time zone setting, a browser interface to your PIM, and `.ics` calendar import/export.
-- Home → **Terminal**: a VT100/ANSI terminal over **SSH** (curve25519, ed25519 keys, chacha20-poly1305, pinned host keys) or telnet, with saved connections and SSH keys kept on the card.
-- **Tailscale**, in the firmware built with `-DPIM_ENABLE_TAILSCALE=ON`: the device joins a tailnet itself over WireGuard, with no relay machine and nothing in the middle. A saved connection to a `100.x` address is then dialled straight through the tunnel, so SSH to a machine anywhere on the tailnet works from the device alone. Wi-Fi & web → Tailscale connects it and shows the address it was given.
-- Data is a CRC-checked snapshot at `/PIM/pim.dat`; a failed or missing SD card does not destroy in-memory data.
+## Which firmware
 
-## Build and flash
+There are two images, both prebuilt and checksummed in `release/`:
 
-Install the ARM Embedded Toolchain, CMake, Ninja, Git, and `picotool`, then initialize the pinned sources:
+| Image | What it is |
+| --- | --- |
+| `picocalc_pim-pico2w-tailscale.uf2` | **The full firmware.** Runs on FreeRTOS and carries the Tailscale client, so the device joins your tailnet itself. Use this one. |
+| `picocalc_pim-pico2w.uf2` | The same organiser, terminal and SSH without Tailscale. Simpler and lighter; a tailnet machine has to be reached through a [relay](#without-tailscale-a-relay) on your LAN. |
+
+Neither image contains a key or anything about your network: everything
+personal is read from the SD card.
+
+To flash: hold **BOOTSEL** on the Pico 2 W while plugging it into USB, then copy
+the `.uf2` onto the drive that appears, or run:
 
 ```bash
-git submodule update --init --recursive   # pico-sdk, PicoCalc, pico-vfs, FreeRTOS-Kernel
-cmake --preset pico2w-release
-cmake --build --preset pico2w-release
+tools/flash-uf2.sh                                         # the release image
+picotool load -f -x release/picocalc_pim-pico2w-tailscale.uf2   # over USB while the firmware runs
 ```
 
-If you would rather not install a system-wide cross compiler, a self-contained
-one works just as well; point the SDK at it and nothing else changes:
+Check a download with `sha256sum -c release/*.sha256`.
+
+## Getting started
+
+1. **Prepare a card.** Any FAT32 card works; the firmware creates `/PIM` and
+   everything under it. To format one from scratch (this **erases** the device
+   named, and only accepts a removable whole disk):
+
+   ```bash
+   tools/prepare-sd.sh --device /dev/sdX          # shows what it would do
+   tools/prepare-sd.sh --device /dev/sdX --yes    # does it
+   ```
+
+   Insert the card before switching on. Without one the device still works, but
+   nothing is saved.
+
+2. **First boot.** If a startup PIN is set it is asked for first. Then, if a
+   saved Wi-Fi network is in range, the device joins it, sets its clock over NTP
+   and goes straight to Home. Otherwise it asks for the date and time (it has no
+   battery-backed clock); **Sync (Wi-Fi)** on that screen fetches it instead.
+
+3. **Join Wi-Fi.** Home → **Wi-Fi & web** → **Scan networks**, pick yours and
+   type the password. It is remembered for next time.
+
+4. **Join your tailnet.** Wi-Fi & web → **Tailscale** → **Connect**. With no key
+   on the card the screen shows a login address: open it on your phone or
+   computer, approve the device, and it finishes by itself. Details, and the
+   auth-key alternative, are under [Tailscale](#tailscale).
+
+5. **Make an SSH key.** Home → **Terminal** → **SSH keys** → **Create**. Install
+   the public half on your servers (see [SSH keys](#ssh-keys)).
+
+6. **Save a connection and connect.** Terminal → **New**, fill in the form, pick
+   the key, **Save**, then **Connect**.
+
+Everywhere: the arrows move, **Enter** opens or activates, **Esc** goes back.
+
+## Tailscale
+
+*Only in the Tailscale image.*
+
+Wi-Fi & web → **Tailscale** shows the state (off, starting, registering, on the
+tailnet), the `100.x` address the device was given, a line saying what it is
+doing, the login address when one is needed, and how much memory is free.
+**Connect** and **Disconnect** do what they say. The device appears on your
+tailnet as an ordinary machine.
+
+Wi-Fi has to be joined first: the tunnel runs over it. While Tailscale is on, the
+web PIM is paused, because the two need the same memory; it comes back when you
+disconnect. Turning Wi-Fi off, or joining a different network, disconnects
+Tailscale cleanly first, and the radio no longer powers itself down while the
+tunnel is up.
+
+### Adding the device to your tailnet
+
+Either way works; pick one.
+
+- **Log in, no key.** Leave the settings file off the card, or leave out
+  `authkey=`, and press Connect. The screen shows a `login.tailscale.com`
+  address. Open it on any device signed in to your tailnet and approve it. The
+  PicoCalc finishes registering on its own, and nothing secret is ever stored on
+  the card.
+- **An auth key.** In the admin console: Settings → Keys → **Generate auth
+  key**. Make it **reusable** (so reflashing does not need a new one) and
+  **pre-approved** if your tailnet requires device approval. Do **not** make it
+  ephemeral, or the device disappears from the tailnet whenever it reboots.
+  Giving it a tag such as `tag:picocalc` lets your ACLs limit what it can reach.
+  Put the key on the card as below.
+
+Once registered, the device keeps its identity in `/PIM/ts/` and reconnects
+without the key or a login.
+
+### `/PIM/tailscale.cfg`
+
+```
+# PicoDeck Tailscale settings. The auth key is a secret.
+authkey=tskey-auth-...   # optional; without it the device asks you to log in
+name=picocalc            # the name it has on the tailnet
+derp=6                   # home relay region; 0 keeps the default (6)
+```
+
+Comments may start a line or follow a value. `derp` is the relay region used
+when no direct path exists; `tailscale netcheck --format=json` on a nearby
+machine reports the best one as `PreferredDERP`. The device works with
+Tailscale's own control plane only; a self-hosted one such as Headscale needs
+its own server key, which there is no way to supply.
+
+Treat this file as a secret, and `/PIM/ts/` even more so, since it holds the
+device's private keys. The web PIM refuses to list or serve either. If you ever
+pasted a key somewhere you should not have, revoke it in the admin console and
+generate a new one.
+
+### Connecting to a tailnet machine
+
+Save a connection whose **Address** is the machine's `100.x` address, or its
+tailnet name (`nas`, or `nas.your-tailnet.ts.net`), and connect while Tailscale
+is on. The connection goes **through the tunnel**: directly to the machine when
+a direct path exists, otherwise via a Tailscale relay, and either way end-to-end
+encrypted. The terminal and SSH client work the same as on the LAN.
+
+If it fails, the message says so plainly. The usual causes are that Tailscale is
+not connected yet, the machine is offline, or the machine is one of more than 20
+on the tailnet (the device's peer table holds 20).
+
+### Without Tailscale: a relay
+
+The image without Tailscale reaches a tailnet machine through a **relay**: a
+computer on your LAN that is on the tailnet and forwards a local port to it.
+
+```bash
+ssh -L 0.0.0.0:2200:nas.your-tailnet.ts.net:22 localhost
+# or: socat TCP-LISTEN:2200,fork,reuseaddr TCP:nas.your-tailnet.ts.net:22
+```
+
+The connection form on the device has no relay fields. Relays come from the
+importer below, which writes them into `hosts.cfg`; the device honours them,
+keeps them when you edit a connection, and ignores them in favour of the tunnel
+whenever Tailscale is on. `tools/picocalc-relay.sh` opens every forward that a
+card's `hosts.cfg` asks for and keeps them up while you work.
+
+## Terminal and SSH
+
+Home → **Terminal** lists your saved connections by name. **New** opens the form:
+
+| Field | Meaning |
+| --- | --- |
+| Name | What the list shows, and the title of the session |
+| Kind | `ssh` or `telnet` |
+| Address | Host name, LAN address, or tailnet address or name |
+| Port | 22 for SSH, 23 for telnet (switching Kind moves the default) |
+| User (ssh) | The login name |
+| SSH key | One of the keys in `/PIM/ssh` |
+
+**Save** keeps it (up to 12), **Connect** dials it, **Delete** removes it.
+Connections live in `/PIM/hosts.cfg`.
+
+### The terminal
+
+A real screen terminal, 40 columns by 38 rows with 48 lines of scrollback:
+VT100/ECMA-48 cursor addressing, scrolling regions, insert and delete, the
+alternate screen (so full-screen programs such as `vi` and `mc` draw properly), DEC line
+drawing, and 256-colour and truecolour mapped onto the current theme. Box
+drawing, blocks and shading are painted directly, since the font has no glyphs
+for them. SSH sessions read UTF-8; telnet sessions read CP437, which is what a
+BBS draws with.
+
+| Key | Does |
+| --- | --- |
+| **Esc** | Leaves the session |
+| **Break** | Sends a real Escape to the host |
+| **Page Up / Page Down** | Scroll back through history; typing returns to the live screen |
+| Arrows, Home, End, Insert, Delete, F1–F10 | Sent as a VT100 sends them |
+| Ctrl + letter | The control character |
+
+Telnet negotiates terminal type and window size, so the host knows the real
+size. Telnet is unencrypted; use it only for a BBS or a LAN machine you trust.
+
+### SSH
+
+| | |
+| --- | --- |
+| Key exchange | `curve25519-sha256` |
+| Host key | `ssh-ed25519` |
+| Cipher and MAC | `chacha20-poly1305@openssh.com` |
+| Login | public key, **ed25519** only |
+
+That is all it offers, so no server can talk it down to something weaker; every
+current OpenSSH server accepts it. You get a pty and a shell at 40x38.
+
+**Host keys are pinned.** The first time you connect to a machine, its
+fingerprint is shown and nothing happens until you press `Y`; it is then kept in
+`/PIM/known_hosts`. If that machine ever presents a different key, the session
+stops with an error instead of asking. If you rebuilt the server on purpose,
+delete its line from `known_hosts` (Files, or the web PIM).
+
+Not supported: password login, agent, port or X11 forwarding, SFTP/SCP, running
+a single command instead of a shell, and rekeying very long sessions.
+
+### SSH keys
+
+Keys live in `/PIM/ssh`: `<name>` is the private half, `<name>.pub` the public
+one, in the usual OpenSSH formats. Home → Terminal → **SSH keys** lists them
+with their type and `SHA256:` fingerprint, and lets you delete one.
+
+- **Create** makes an ed25519 key on the device from the RP2350's hardware
+  random source. The private half never leaves the card. The screen shows the
+  fingerprint and the `.pub` file to install.
+- **Bring your own:** copy an **unencrypted ed25519** pair onto the card. A key
+  with a passphrase, or an RSA or ECDSA key, is refused with the reason.
+
+To install the public key on a server, append the `.pub` line to
+`~/.ssh/authorized_keys` there. The web PIM serves `.pub` files (it never serves
+a private key), and `tools/picocalc-key-install.sh picocalc.pub host...` appends
+it to **root's** `authorized_keys` on the hosts you name (every Linux machine on
+the tailnet if you name none), leaving any that already have it untouched.
+
+The card is removable and not encrypted, so use a key made for this device
+alone, and remove it from your servers if you lose the card.
+
+### Importing connections from `~/.ssh/config`
+
+`tools/pim-hosts-import.py` turns your computer's SSH config into a `hosts.cfg`.
+It asks `ssh -G` what each alias resolves to, so `Include`, `Match` and defaults
+are handled by ssh itself, and clips everything to the device's limits.
+
+```bash
+tools/pim-hosts-import.py                                   # preview
+tools/pim-hosts-import.py --private                         # write to your private folder
+tools/pim-hosts-import.py --resolve-tailnet --out /media/sd/PIM/hosts.cfg --merge
+tools/pim-hosts-import.py --relay 192.168.1.9 --print-forwards --out ...   # image without Tailscale
+```
+
+`--resolve-tailnet` writes `100.x` addresses instead of names, `--relay` routes
+every host through one LAN machine and `--print-forwards` prints the commands to
+run there. `--copy-keys DIR` copies the matching key pairs. Aliases that use
+`ProxyJump` are warned about rather than guessed at.
+
+Your host list and keys never belong in a repository. `--private` writes to
+`$PICODECK_PRIVATE_DIR`, or `~/.local/share/picodeck`, with owner-only
+permissions, and the tool refuses to write a host list or key inside any git
+work tree unless you pass `--allow-in-repo`.
+
+## Wi-Fi and the web PIM
+
+Home → **Wi-Fi & web**:
+
+| Button | Does |
+| --- | --- |
+| Join saved | Rejoins a remembered network (up to 4 are kept) |
+| Scan networks | Lists nearby networks by signal; pick one and type the password |
+| Manual entry | For a hidden network |
+| Sync time | Sets the clock from `pool.ntp.org` |
+| Time zone | The UTC offset (default UTC+05:30) |
+| Forget saved | Removes a remembered network |
+| Web address | Shows the web PIM's address and PIN again |
+| Wi-Fi off | Powers the radio down |
+| Tailscale | The [Tailscale](#tailscale) screen (Tailscale image only) |
+
+Wi-Fi passwords are stored in plain text in `/PIM/wifi.cfg`. With no session
+open and no tunnel up, the radio powers down after 15 idle minutes to save
+battery.
+
+### The web PIM
+
+After joining, the device shows an address such as `http://192.168.1.20:8080`
+and a 4-digit PIN that changes every time. Open it in a browser on the same
+network, enter the PIN, and you can read and edit the agenda, to-dos, notes and
+journal, browse and edit files on the card, download `calendar.ics`, and import
+an `.ics` file. Changes go straight to the card. Ten wrong PINs lock the server
+until the next connection. It is paused while Tailscale is on, and if there is
+not enough memory to start it, Wi-Fi still works and the screen says so.
+
+From the command line the PIN goes in a cookie:
+
+```bash
+curl -H 'Cookie: pim=PIN' -T notes.txt http://DEVICE:8080/upload/notes.txt   # up to 8 KiB
+curl -H 'Cookie: pim=PIN' http://DEVICE:8080/file/notes.txt -o notes.txt
+curl -H 'Cookie: pim=PIN' http://DEVICE:8080/calendar.ics -o pim.ics
+curl -H 'Cookie: pim=PIN' --data-binary @phone.ics http://DEVICE:8080/import
+tools/pim-sync.sh pull DEVICE PIN ./backup     # mirror the card's files to a folder
+tools/pim-sync.sh push DEVICE PIN ./backup     # and back
+```
+
+`.ics` import takes events and to-dos, treats every time as local time and skips
+duplicates. Calendar subscriptions (HTTPS URLs) are not supported; export the
+file and import it instead.
+
+The server is plain HTTP and the PIN is a speed bump, not encryption: use it on
+networks you trust. It never lists or serves private SSH keys,
+`tailscale.cfg`, `/PIM/ts/`, `wifi.cfg`, `hosts.cfg`, `lock.cfg` or `pim.dat`.
+
+## Organiser, tools and games
+
+**Home** shows the clock, battery, and: Calendar, To-Do List, Notes, Journal,
+Files, Text editor, Tools, Wi-Fi & web, Today, Games, Theme, Terminal and Sound.
+
+- **Calendar.** Arrow to a day and press Enter to add an appointment: start
+  hour, minute and length with UP/DOWN, then a title and notes. Days with
+  appointments are marked `*`. `,` and `.` change month, `<` and `>` the year,
+  `T` jumps to today and `G` opens a date picker.
+- **To-Do List.** Priorities and optional due dates.
+- **Today.** Today's appointments plus due and overdue to-dos.
+- **Notes** and **Journal.** The journal keeps one Markdown file per day
+  (`/PIM/journal/DD-MM-YYYY.md`) and edits it like the text editor.
+- **Files** and **Text editor.** Browse folders on the card, create and delete
+  files and folders, and edit text files of any size: 40 columns, soft-wrapped,
+  paged 4 KiB at a time, saved when you change page.
+- **Tools.** Full-text **Search** across everything; a scientific
+  **Calculator** (live result, `+ - * /` continues from the last answer, UP
+  recalls earlier ones); a **Timer**; **Recurring** appointments (daily, weekly,
+  monthly, yearly); **Backup** and restore of `/PIM` (the newest 5 are kept);
+  and **Device PIN**.
+- **Games.** Tetris, a dungeon crawler (8 floors, orcs, a boss, sword and
+  armour), Space Invaders, Solitaire, Snake, Minesweeper and 2048, each with
+  sound and a top-5 score table. Each game has a folder in `/PIM/games/` with
+  its settings and scores, and the dungeon's floors are editable text maps
+  (`floor1.txt`…`floor8.txt`, 16x12: `M` monster, `O` orc, `B` boss, `/` sword,
+  `[` armour). Missing files are recreated from defaults; your edits are never
+  overwritten.
+- **Theme.** Amber, Green, Manila, Cyan, Violet, Red, Mono and Paper (Manila and
+  Paper are light).
+- **Sound.** Key clicks and game effects on or off.
+
+Power: the backlight dims after 30 s and switches off after 2 minutes idle; any
+key wakes it. A banner and a sound warn at 10% battery. The battery level comes
+from the keyboard controller, which only reports once the device has run on
+battery since power-up.
+
+Reliability: a hardware watchdog reboots a hung device. If a start fails, or the
+device restarts because of a fault, the next boot shows **Last start** with what
+it was doing and why; a start that died while joining Wi-Fi skips the automatic
+join once, so a faulty network cannot cause a boot loop.
+
+## The startup PIN
+
+Home → Tools → **Device PIN** sets a six-digit PIN asked for at every boot,
+before anything else. It cannot be skipped, and wrong guesses earn a wait that
+grows to a minute. What is stored, in `/PIM/lock.cfg`, is a random salt and
+50,000 rounds of SHA-256, never the PIN.
+
+Know its limit: **the card is not encrypted.** Anyone holding the card can read
+your notes, `hosts.cfg`, `tailscale.cfg` and the SSH keys directly, and could
+try all million PINs offline in hours. The PIN keeps a person out of the device,
+not out of the card. If you lose the card, revoke the device in the Tailscale
+admin console and remove its SSH key from your servers.
+
+## What is on the card
+
+| Path | Holds | Private? |
+| --- | --- | --- |
+| `/PIM/pim.dat` | The organiser's database (CRC-checked, written safely) | yes |
+| `/PIM/appointments/`, `todos/`, `notes/`, `calendar/` | Readable exports, regenerated on every change | yes |
+| `/PIM/journal/` | One Markdown file per day | yes |
+| `/PIM/hosts.cfg` | Saved connections | yes |
+| `/PIM/known_hosts` | Pinned SSH host keys | |
+| `/PIM/ssh/` | SSH key pairs | **secret** |
+| `/PIM/tailscale.cfg` | Tailscale settings and auth key | **secret** |
+| `/PIM/ts/` | The device's Tailscale identity | **secret** |
+| `/PIM/wifi.cfg` | Saved networks and their passwords | **secret** |
+| `/PIM/lock.cfg` | The PIN's salted hash | |
+| `/PIM/today.cfg`, `theme.cfg`, `sound.cfg` | Clock, theme and sound settings | |
+| `/PIM/games/` | Game settings, scores and dungeon maps | |
+| `/PIM/backup/` | Backups made from Tools | yes |
+
+The exports are views of `pim.dat`: edit through the device or the web PIM, as
+the next save rewrites them.
+
+## Building
+
+Install CMake, Ninja, Git and `picotool`, plus an ARM GCC. If you would rather
+not install a cross compiler system-wide, a self-contained one works:
 
 ```bash
 curl -L -o /tmp/arm-gcc.tar.gz https://github.com/xpack-dev-tools/arm-none-eabi-gcc-xpack/releases/download/v15.2.1-1.1/xpack-arm-none-eabi-gcc-15.2.1-1.1-linux-x64.tar.gz
@@ -47,355 +398,80 @@ export PICO_TOOLCHAIN_PATH=$PWD/build/toolchain/xpack-arm-none-eabi-gcc-15.2.1-1
 export PATH=$PICO_TOOLCHAIN_PATH/bin:$PATH
 ```
 
-There is a second firmware configuration, `cmake --preset pico2w-tailscale`,
-which swaps the cooperative LVGL loop for FreeRTOS and lwIP with BSD sockets so
-that it can carry the Tailscale client. It works: the device registers with the
-control plane, holds a WireGuard tunnel and runs SSH sessions over it. It is
-still a **bring-up build** rather than a release - it logs over USB, reports
-boot faults on screen, and gives LVGL a smaller heap - so the shipping firmware
-remains `pico2w-release`, which carries none of it and is unaffected.
-
-What that cost, and what paid for it, is in
-[docs/TAILSCALE.md](docs/TAILSCALE.md): a tailnet of sixteen machines sends a
-32 KB network map, cJSON's tree of it wants about 87 KB, and this board has
-520 KB in total. The answers were to drop the fields the client never reads, to
-parse the peer list one element at a time rather than all at once, and to stop
-reserving memory that was not being used - shared LVGL styles instead of
-per-widget ones, and the terminal's buffers taken only while a session is open.
-
-The build produces `build/pico2w-release/picocalc_pim.uf2`. Prebuilt, checksummed images are included: `release/picocalc_pim-pico2w.uf2` (no Tailscale) and `release/picocalc_pim-pico2w-tailscale.uf2` (built with `cmake --preset pico2w-tailscale`, which joins the tailnet itself). Neither carries a key; the Tailscale one reads `/PIM/tailscale.cfg` from the card. Hold BOOTSEL while connecting the Pico 2 W, then run:
+Then:
 
 ```bash
-tools/flash-uf2.sh
+git submodule update --init --recursive     # pico-sdk, PicoCalc, pico-vfs, FreeRTOS-Kernel
+
+cmake --preset pico2w-tailscale && cmake --build build/pico2w-tailscale   # the full firmware
+cmake --preset pico2w-release   && cmake --build --preset pico2w-release  # without Tailscale
 ```
 
-## SD card setup
-
-The storage utility creates one FAT32 partition and its `PIM/` directory. It only accepts a removable whole disk, but it **erases the selected device**:
-
-```bash
-tools/prepare-sd.sh --device /dev/sdX
-tools/prepare-sd.sh --device /dev/sdX --yes
-```
-
-Insert the card before starting the PicoCalc. If the card is absent or unreadable, the PDA continues without persistence for that session.
-
-The firmware also maintains human-readable exports after each PIM change:
-
-| Directory | Format |
-| --- | --- |
-| `/PIM/appointments/` | `appointments.csv` (`date,time,duration_minutes,title,description`) |
-| `/PIM/todos/` | `todos.csv` |
-| `/PIM/notes/` | one Markdown file per note |
-| `/PIM/journal/` | one `DD-MM-YYYY.md` file per entry |
-| `/PIM/calendar/` | `calendar.md` overview |
-
-These are generated views of the crash-safe `pim.dat` database. Edit them for reference or export, but use the PDA interface for PIM changes because the next save regenerates them.
-
-## Wi-Fi and web
-
-Open **Wi-Fi & web** on the home screen.
-
-- **Scan networks** lists nearby networks by signal; pick one and type its password. **Manual entry** is for hidden networks. Joined networks are remembered (up to four) in `/PIM/wifi.cfg` on the SD card, **Join saved** reconnects and **Forget saved** removes one. Passwords are stored in plain text on the SD card.
-- **Sync time** joins your most recent saved network if needed and sets the clock from `pool.ntp.org`. **Time zone** sets the UTC offset (default UTC+05:30). The startup screen has a **Sync (Wi-Fi)** button that does the same before you press Start.
-- After connecting (and from **Web address**) the screen shows `http://DEVICE:8080` and a 4-digit PIN that changes every connection.
-
-### Browser interface
-
-Open the address on a phone or PC on the same network and enter the PIN. You can view and edit the agenda, to-dos, notes, journal and any text or `.c` file in `/PIM`, download `calendar.ics`, and import an `.ics` file from `/import`. Changes are saved to the SD card straight away and the PDA returns to Home so its lists refresh. After 10 wrong PINs the server locks until you reconnect.
-
-Command-line use needs the PIN as a cookie:
-
-```bash
-curl -H 'Cookie: pim=PIN' -T notes.txt http://DEVICE:8080/upload/notes.txt   # up to 8 KiB
-curl -H 'Cookie: pim=PIN' http://DEVICE:8080/file/notes.txt -o notes.txt
-curl -H 'Cookie: pim=PIN' http://DEVICE:8080/calendar.ics -o pim.ics
-curl -H 'Cookie: pim=PIN' --data-binary @phone.ics http://DEVICE:8080/import
-```
-
-`.ics` import takes events and to-dos; all times (floating, UTC or TZID) are treated as local time, and duplicates are skipped. Subscribing to a calendar URL is not supported because those are HTTPS and the firmware has no TLS. Export from your phone or calendar service and import the file instead.
-
-The server speaks plain HTTP: the PIN is a speed bump, not encryption, so only use it on a network you trust. Firmware updates still require the BOOTSEL UF2 process.
-
-### Terminal
-
-Home → **Terminal** keeps a list of saved connections in `/PIM/hosts.cfg`. **New** asks for:
-
-| Field | Meaning |
-| --- | --- |
-| Name | What the list shows, and the title in the session's status line |
-| Kind | `telnet` or `ssh`; both connect |
-| Address | The real host name, which is what SSH will authenticate |
-| Port | 23 for telnet, 22 for ssh |
-| User | The SSH login; telnet ignores it |
-| SSH key | One of the keys in `/PIM/ssh` |
-
-The session is a real screen terminal, not a line printer: 40 columns by 38 rows
-of cells, 48 lines of scrollback, VT100 and ECMA-48 cursor addressing, scrolling
-regions, insert/delete, the alternate screen (so full-screen programs such as
-`vi` and `mc` draw correctly), DEC line drawing, UTF-8 and 256-colour and
-truecolour SGR folded onto the current theme's brightness levels. Box drawing,
-blocks and shading are painted directly, since the 8x8 font has no glyphs for
-them. It answers cursor-position and device-attribute requests, and negotiates
-ECHO, SGA, BINARY, TERMINAL-TYPE (`ansi`, then `vt100`) and NAWS, so the host is
-told the real window size instead of assuming 80x24.
-
-Bytes above 127 are read as **CP437**, which is what a BBS draws its boxes and
-blocks with, so nothing is lost or guessed at. The two encodings cannot be told
-apart by looking (`0xcd 0xbb` is both a valid UTF-8 character and a pair of
-CP437 box glyphs), so it is a setting rather than a heuristic:
-`pim_vt_set_encoding()` switches a session to UTF-8, which is what an SSH
-session to a Linux host will want. In CP437 mode a UTF-8 host's accented
-characters appear as two CP437 glyphs; plain ASCII is identical either way.
-
-Keys: **Esc** leaves the session, **Break** sends a real Escape to the host,
-**Page Up/Down** browse the scrollback (typing returns to the newest output),
-and the arrows, Home, End, Insert, Delete, F1–F10 and Ctrl with a letter all go
-to the host as the sequences a VT100 sends. Enter sends CR LF, as NVT asks.
-Text is sent in the clear, so treat a telnet session as public.
-
-### Tailscale and SSH keys
-
-The device can join a tailnet itself, in the firmware built with
-`-DPIM_ENABLE_TAILSCALE=ON` (`cmake --preset pico2w-tailscale`). **Wi-Fi & web
--> Tailscale** connects and disconnects and shows the state, the `100.x`
-address it was given, and how much memory is free - the number that explains a
-refusal to start, since parsing a network map needs a large run of it. The web
-PIM pauses while the tunnel is up, because the two want the same memory.
-
-What it needs goes on the card, in `/PIM/tailscale.cfg`:
-
-```
-authkey=tskey-auth-...   # optional; without it the device asks you to log in
-name=picocalc            # the name it appears under on the tailnet
-derp=6                   # home relay region; `tailscale netcheck --format=json`
-                         # reports PreferredDERP. 0 keeps the default
-```
-
-Comments may follow a value on the same line, as above. The device only works
-with Tailscale's own control plane; a self-hosted one such as Headscale would
-need its server key, which there is no way to supply.
-
-Two ways to add it to a tailnet:
-
-- **Interactive login, no key.** Leave `authkey` out, or leave the file off the
-  card entirely, and press Connect. The control plane answers with a login
-  address, which the screen shows in full; open it on any machine, approve the
-  device, and it finishes by itself. Nothing secret is ever stored on the card.
-- **An auth key.** Admin console -> Settings -> Keys -> Generate auth key. Make
-  it **reusable** so a reflash does not need a new one, **pre-approved** if your
-  tailnet requires device approval, and give it a tag such as `tag:picocalc` so
-  an ACL can limit what it reaches. Do not make it ephemeral, or the node
-  disappears on reboot. Put it in `authkey=`.
-
-The key is a secret and the device's own identity - its machine, WireGuard and
-DISCO keys, kept in `/PIM/ts` - is more so. The web server refuses to list or
-serve either, and `.gitignore` covers both in case a copy ever lands in a
-checkout. A key compiled into the firmware would travel in every copy of the
-UF2, which is why it is read off the card instead.
-
-Once the tunnel is up, a saved connection whose address is in `100.64.0.0/10`,
-or a name the tailnet's DNS knows, is dialled **through the tunnel** - no relay,
-no forwards on another machine. Neither the terminal nor the SSH client knows
-the difference.
-
-Relay certificates are not checked: the firmware carries no certificate
-bundle. That costs less than it sounds, and it is how Tailscale itself treats
-relays. The control plane is authenticated by its Noise handshake against
-Tailscale's pinned server key, whatever the transport, and everything relayed
-through DERP is WireGuard-encrypted to the peer. What it gives up is noticing
-something posing as a relay in order to drop or delay packets.
-
-Two numbers worth knowing. The peer table holds **20** machines
-(`CONFIG_ML_MAX_PEERS`): a table smaller than the tailnet churns, and a machine
-that has been pushed out of it simply cannot be reached - which looks like SSH
-failing rather than like a full table. And the relay is reached by the address
-the control plane supplies rather than by its name, because resolving
-`derp*.tailscale.com` failed on this board every time while the control plane's
-own name resolved fine; an address needs no resolver at all.
-
-**Why it once froze on a direct connection.** The client sends a packet
-straight from the calling task when that task already holds lwIP's core lock,
-and otherwise hands it to the network thread. It asks which case it is in
-through a port function, and the first port answered a different question -
-"is this the network thread?" - so a connection made from the screen's task,
-which does hold the lock while connecting, posted its packet to the network
-thread and then waited for that thread while holding the lock it needed. Relayed
-connections never took that path, which is why they worked and direct ones hung
-the whole device. The port now asks the lock itself who holds it.
-
-A connection attempt is also bounded. lwIP's blocking `connect()` ignores
-`SO_SNDTIMEO` - `netconn_connect` waits on its completion semaphore with a
-timeout of zero, and `send_timeout` is only consulted when closing - so a dead
-path held the call for TCP's entire retransmission schedule, on the task that
-draws the screen. It is now a non-blocking connect with a deadline, so a host
-that cannot be reached fails and says so rather than freezing the device.
-
-#### Without the Tailscale firmware: a relay
-
-The shipping firmware does not carry the client, so a tailnet host has to be
-reached through a **relay**: a LAN machine that *is* on your tailnet, forwarding
-a local port to it.
-
-The connection form on the device has no relay fields - they were taken out when
-the tunnel arrived, since the device now joins the tailnet itself and the tunnel
-is preferred over a relay whenever it is up. A relay saved by the importer below
-is still honoured, and still carried through when you edit a connection on the
-device, so existing cards keep working. On a LAN machine, for example:
-
-```bash
-ssh -L 2200:nas.tail1a2b.ts.net:22 localhost   # or: socat TCP-LISTEN:2200,fork,reuseaddr TCP:nas.tail1a2b.ts.net:22
-```
-
-then save a connection whose address is `nas.tail1a2b.ts.net` and whose relay is
-that machine and port. The alias keeps the real name, which is what SSH checks
-and what you recognise in the list, while the device dials the relay.
-
-`tools/pim-hosts-import.py` writes `hosts.cfg` from this computer's
-`~/.ssh/config`. It asks `ssh -G` what each alias really resolves to, so
-Include, Match and defaults are handled by ssh itself, and it clips names, ports
-and key names to the device's limits so the result cannot be rejected:
-
-```bash
-tools/pim-hosts-import.py                                   # preview on stdout
-tools/pim-hosts-import.py --resolve-tailnet \
-    --relay 192.168.1.9 --print-forwards \
-    --out /mnt/sdcard/PIM/hosts.cfg --merge
-```
-
-Generated host lists and copied keys are kept **outside the repository**.
-`--private` writes to `$PICODECK_PRIVATE_DIR`, or
-`${XDG_DATA_HOME:-~/.local/share}/picodeck`, creating it `0700` with the host
-list `0600`; `--copy-keys` with no path puts key pairs in its `ssh/` folder. The
-tool refuses to write a host list or a key anywhere inside a git work tree
-unless you pass `--allow-in-repo`, so none of it can be committed by accident.
-If your home directory is itself synced somewhere, point `PICODECK_PRIVATE_DIR`
-at a path outside that sync. `.gitignore` carries matching rules as a backstop.
-
-`--resolve-tailnet` writes each host's `100.x` address instead of its MagicDNS
-name, since the device cannot resolve those. `--relay` routes every imported
-host through one LAN machine and assigns it a local port, and `--print-forwards`
-prints the `ssh -L` or `socat` command to run there. `--copy-keys DIR` copies the
-matching key pair onto the card. It warns rather than guesses when an alias uses
-`ProxyJump`, which the device cannot do, or resolves to loopback.
-
-SSH identities live in `/PIM/ssh`: `<name>.pub` is the public key in the usual
-one-line OpenSSH format, `<name>` the private half. Home → Terminal → **SSH
-keys** lists what it finds with the type, size and the same `SHA256:`
-fingerprint `ssh-keygen -lf` prints, and lets you delete one or attach it to a
-connection. **Terminal → SSH keys → Create** makes an ed25519 key pair on the device: the
-seed comes from the RP2350's hardware random source, the private half is written
-to the card and never leaves it, and the screen shows the fingerprint and the
-name of the `.pub` file to install on the server. The format is OpenSSH's own -
-`ssh-keygen -y` on a key made this way derives exactly the public half the
-device wrote.
-
-Alternatively, copy an existing pair onto the card, or send one to the device:
-
-```bash
-curl -H 'Cookie: pim=PIN' --data-binary @~/.ssh/id_ed25519 \
-    http://DEVICE:8080/upload/ssh/picocalc
-```
-
-The web server will accept a key but never hand a **private** one back:
-`/PIM/ssh` is left out of the file listing and the manifest, and the download and
-editor routes answer 403 for anything there that is not a `.pub`. Public halves
-are served, because installing one on a server is the whole point of having it.
-An upload crosses the network in the clear, so for a private key the SD card is
-the better route - or better still, make the key on the device and never move it
-at all. The card is removable and unencrypted, so use a key made
-for this device alone and nothing else.
-
-Getting the device onto the tailnet itself is a port of an existing MIT-licensed
-C client; [docs/TAILSCALE.md](docs/TAILSCALE.md) has the plan, the memory budget
-and the one architectural decision it needs.
-
-### SSH
-
-SSH works. One algorithm of each kind, all of them what a current OpenSSH
-prefers anyway:
-
-| | |
-| --- | --- |
-| key exchange | `curve25519-sha256` |
-| host key | `ssh-ed25519` |
-| cipher and MAC | `chacha20-poly1305@openssh.com` |
-| authentication | `publickey` with an ed25519 key, or a password |
-
-Nothing else is offered or accepted. That keeps the client small enough to read
-in one sitting and leaves no weaker option for a server to talk it into.
-
-Set a connection's **Kind** to `ssh`, give it a **User** and pick an **SSH key**,
-and Connect opens a real session: a pty, a shell, and the terminal in front of
-it. The window size is sent as 40x38, and again if it changes.
-
-**Host keys are pinned.** The first time a host is seen, its fingerprint is
-shown in the terminal and nothing goes further until you press `Y`; it is then
-remembered in `/PIM/known_hosts`. If a known host ever presents a different key
-the session stops with an error rather than asking, because that is the one
-moment where a question teaches the wrong habit.
-
-Keys must be **unencrypted ed25519** (`ssh-keygen -t ed25519`). A key with a
-passphrase, or an RSA or ECDSA key, is refused with the reason rather than
-half-read. Bytes above 127 in an SSH session are read as UTF-8, unlike the CP437
-of a BBS.
-
-Not implemented, and not pretended: agent forwarding, port forwarding, X11,
-SFTP and SCP, running a single command instead of a shell, and rekeying a
-long-lived session.
-
-The crypto is SHA-256 and ChaCha20-Poly1305 written here against the RFC 8439
-and NIST vectors, with X25519 and Ed25519 from
-[tweetnacl](third_party/tweetnacl) because curve arithmetic is not worth writing
-by hand. The whole stack costs 48 KB of flash and 22 KB of RAM.
-
-### The startup PIN, and what it is worth
-
-Home → Tools → **Device PIN** sets a six digit PIN that is asked for at every
-boot, before the clock screen and before Home. `Esc` does not skip it, and
-neither does the web server's "something changed" hook; until the PIN is
-accepted there is nowhere else to go. Three wrong attempts start a wait that
-grows to a minute, so guessing by hand is pointless.
-
-What is stored in `/PIM/lock.cfg` is a random 16-byte salt and 50,000 rounds of
-SHA-256 over salt and PIN, never the PIN itself. The rounds cost about a second
-on the device, once per boot.
-
-Be clear about the limit, though. Six digits is a million possibilities, and an
-offline attacker with the card can try them all: at the measured 70 ms per guess
-on a desktop that is hours on one core, less on many, and less again on a GPU,
-because SHA-256 is exactly what graphics cards are good at. **The card is not
-encrypted.** Anything on it - notes, the PIM database, `hosts.cfg`, and the SSH
-private keys in `/PIM/ssh` - can be read directly by anyone holding it. The PIN
-is a lock on the front door, not a safe, and both screens that mention it say so.
-
-If the keys are what you care about, the thing that would actually help is
-encrypting them at rest with a passphrase entered at connect time; the
-primitives for that (ChaCha20-Poly1305 and SHA-256) are already here and
-vectored.
-
-`tools/ssh-live-test.sh` is the test that matters: it starts a throwaway sshd on
-a spare port with its own host key and its own `authorized_keys`, then has the
-client complete a key exchange, verify the host key against what `ssh-keygen`
-says, authenticate, open a shell, run a command and read the output back. It
-touches neither the real sshd nor `~/.ssh`, and skips when there is no sshd to
-talk to.
+Each build leaves `picocalc_pim.uf2` in its build folder. The Tailscale build
+also writes a log to USB serial (115200), useful when something goes wrong:
+`cat /dev/ttyACM0`. Source paths are stripped from the binaries, so an image
+never carries the path or user name of the machine that built it.
 
 ## Tests
 
-The application core is hardware-independent C and runs on the build host:
+Everything outside the hardware drivers is plain C and is tested on the build
+machine:
 
 ```bash
-cmake --preset host-debug
-cmake --build --preset host-debug
-ctest --preset host-debug
+cmake --preset host-debug && cmake --build --preset host-debug && ctest --preset host-debug
+cmake --preset host-ui && cmake --build --preset host-ui && ctest --preset host-ui
+tools/ssh-live-test.sh build/host-debug
 ```
 
-Ten suites: the PIM core, the tools, SSH (against the RFC vectors and a real
-`sshd`), saved connections, the terminal emulator, the startup PIN, the
-Tailscale settings file and what counts as an auth key, the startup fault
-report, and the JSON trimming and array walking that make a network map fit.
+Eleven suites: the organiser core and web PIM, the tools, saved connections,
+the `~/.ssh/config` importer, SSH crypto against the RFC and NIST vectors along
+with keys and the PIN, a live SSH session (run by the script below), the
+terminal emulator, the Tailscale settings file, the startup fault report, the
+JSON trimming that lets a network map fit, and **the UI simulation**: the real `ui.c` running headless on LVGL under AddressSanitizer
+and UBSan, driven by key presses through every screen, checking output on the
+card, colours pixel by pixel, memory leaks over 100 rounds, and a 12,000-key
+fuzz run.
 
-## UI simulation tests
+`tools/ssh-live-test.sh` is the one that matters most for SSH. It starts a
+throwaway `sshd` on a spare local port with its own host key, then has the
+client exchange keys, check the host key against `ssh-keygen`, log in, open a
+shell, run a command and read the output. It never touches your real sshd or
+`~/.ssh`.
 
-`cmake --preset host-ui && cmake --build --preset host-ui && ctest --preset host-ui` runs the real `ui.c` headlessly on LVGL (clang + ASan/UBSan) with synthetic key presses. It checks every screen, the SD file output, the amber-on-black palette pixel by pixel, memory leaks and a 12,000-key fuzz run. The terminal is covered there too: the cell grid is drawn rather than built from labels, so the tests read it back as text through `pim_ui_terminal_text()`.
+## How it works, and what went wrong on the way
+
+**Memory.** The Pico 2 W has 520 KB of RAM, and a tailnet of sixteen machines
+sends a 32 KB network map that cJSON would need about 87 KB to hold as a tree.
+The client therefore drops the fields it never reads and parses the peer list
+one machine at a time; the interface uses shared styles instead of per-widget
+ones; the terminal takes its buffers only while a session is open; and the web
+PIM gives its 29 KB back while Tailscale runs. With all of that, about 100 KB is
+free after the map is parsed. The receive buffer for map updates also grows by
+what it needs rather than doubling: doubling once asked for 96 KB at a time and
+was the cause of the old "lost in the control plane" reconnects.
+
+**The freeze on direct connections.** The Tailscale client sends a packet
+straight from the calling task if that task already holds lwIP's core lock, and
+otherwise hands it to the network thread. It asks which case applies through a
+port function, and the first port answered a different question ("is this the
+network thread?"). A connection made from the screen's task, which holds the
+lock while connecting, therefore handed its packet to the network thread and
+waited for it while holding the lock that thread needed. Relayed connections
+never took that path, which is why they worked while direct ones froze the
+device. The port now asks the lock itself who holds it.
+
+**Bounded connects.** lwIP's blocking `connect()` ignores `SO_SNDTIMEO`, so a
+dead path held the screen's task for TCP's whole retry schedule. Connects are
+now non-blocking with a deadline, and an unreachable host fails with a message.
+
+**Relays and certificates.** The DERP relay is reached by the address the
+control plane supplies, because resolving `derp*.tailscale.com` failed on this
+board. Relay certificates are not checked (the firmware has no certificate
+bundle), which is how Tailscale itself treats relays: the control plane is
+authenticated by its Noise handshake against Tailscale's pinned key, and
+everything relayed is WireGuard-encrypted to the far machine.
+
+The Tailscale client is [MicroLink](https://github.com/CamM2325/microlink)
+(MIT), vendored in `third_party/microlink/`. Every change made to it, and why,
+is listed in its [PROVENANCE.md](third_party/microlink/PROVENANCE.md); the
+original porting plan is in [docs/TAILSCALE.md](docs/TAILSCALE.md).

@@ -1,5 +1,12 @@
 # Putting the PicoCalc on a tailnet
 
+> **Status: done.** This is the plan written before the port. The port is
+> finished and in daily use: the Tailscale firmware registers, holds a
+> WireGuard tunnel and runs SSH over it, directly or via DERP. How to use it is
+> in the [README](../README.md#tailscale); every change made to the client, and
+> why, is in [PROVENANCE.md](../third_party/microlink/PROVENANCE.md). Figures
+> below are as estimated at the time.
+
 Goal: the device gets its own `100.x.y.z` address and reaches the whole
 infrastructure directly, instead of going through a LAN relay.
 

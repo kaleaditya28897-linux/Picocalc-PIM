@@ -3,9 +3,9 @@
 #
 #   tools/picocalc-relay.sh [--jump HOST] [path to hosts.cfg]
 #
-# The device cannot join a Tailscale network itself (see docs/TAILSCALE.md), so
-# it reaches this workstation over the LAN and this workstation reaches the
-# tailnet. Each forward binds 0.0.0.0 so the device can connect to it; nothing
+# For the firmware built without Tailscale: that one cannot join the tailnet
+# itself, so it reaches this workstation over the LAN and this workstation
+# reaches the tailnet. The Tailscale firmware does not need this at all. Each forward binds 0.0.0.0 so the device can connect to it; nothing
 # is published beyond the local network. Leave it running while you use the
 # device and stop it with Ctrl-C.
 #
