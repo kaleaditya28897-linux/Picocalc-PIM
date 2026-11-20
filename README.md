@@ -63,7 +63,7 @@ parse the peer list one element at a time rather than all at once, and to stop
 reserving memory that was not being used - shared LVGL styles instead of
 per-widget ones, and the terminal's buffers taken only while a session is open.
 
-The build produces `build/pico2w-release/picocalc_pim.uf2`; a prebuilt, checksummed image is included at `release/picocalc_pim-pico2w.uf2`. Hold BOOTSEL while connecting the Pico 2 W, then run:
+The build produces `build/pico2w-release/picocalc_pim.uf2`. Prebuilt, checksummed images are included: `release/picocalc_pim-pico2w.uf2` (no Tailscale) and `release/picocalc_pim-pico2w-tailscale.uf2` (built with `cmake --preset pico2w-tailscale`, which joins the tailnet itself). Neither carries a key; the Tailscale one reads `/PIM/tailscale.cfg` from the card. Hold BOOTSEL while connecting the Pico 2 W, then run:
 
 ```bash
 tools/flash-uf2.sh
@@ -170,8 +170,11 @@ authkey=tskey-auth-...   # optional; without it the device asks you to log in
 name=picocalc            # the name it appears under on the tailnet
 derp=6                   # home relay region; `tailscale netcheck --format=json`
                          # reports PreferredDERP. 0 keeps the default
-verifyderp=0             # relay certificates are not checked; see below
 ```
+
+Comments may follow a value on the same line, as above. The device only works
+with Tailscale's own control plane; a self-hosted one such as Headscale would
+need its server key, which there is no way to supply.
 
 Two ways to add it to a tailnet:
 
@@ -196,8 +199,11 @@ or a name the tailnet's DNS knows, is dialled **through the tunnel** - no relay,
 no forwards on another machine. Neither the terminal nor the SSH client knows
 the difference.
 
-Relayed traffic through DERP stays WireGuard-encrypted end to end, so
-`verifyderp=0` does not expose its contents; what it gives up is noticing
+Relay certificates are not checked: the firmware carries no certificate
+bundle. That costs less than it sounds, and it is how Tailscale itself treats
+relays. The control plane is authenticated by its Noise handshake against
+Tailscale's pinned server key, whatever the transport, and everything relayed
+through DERP is WireGuard-encrypted to the peer. What it gives up is noticing
 something posing as a relay in order to drop or delay packets.
 
 Two numbers worth knowing. The peer table holds **20** machines
@@ -208,14 +214,22 @@ the control plane supplies rather than by its name, because resolving
 `derp*.tailscale.com` failed on this board every time while the control plane's
 own name resolved fine; an address needs no resolver at all.
 
-**A known limitation.** Direct paths work to peers on the local network, and the
-relay works for everything, but a direct path to a peer behind a symmetric NAT
-can be validated by DISCO and still carry no data - the device then commits to
-it and waits instead of falling back to the relay. Peers reached over DERP or a
-LAN endpoint are solid; a peer behind such a NAT may hang on first connection
-until the mapping is punched from its side. This is the next thing to fix, and
-the shape of the fix is Tailscale's own rule: carry data over the relay until a
-direct path has actually passed some, then switch.
+**Why it once froze on a direct connection.** The client sends a packet
+straight from the calling task when that task already holds lwIP's core lock,
+and otherwise hands it to the network thread. It asks which case it is in
+through a port function, and the first port answered a different question -
+"is this the network thread?" - so a connection made from the screen's task,
+which does hold the lock while connecting, posted its packet to the network
+thread and then waited for that thread while holding the lock it needed. Relayed
+connections never took that path, which is why they worked and direct ones hung
+the whole device. The port now asks the lock itself who holds it.
+
+A connection attempt is also bounded. lwIP's blocking `connect()` ignores
+`SO_SNDTIMEO` - `netconn_connect` waits on its completion semaphore with a
+timeout of zero, and `send_timeout` is only consulted when closing - so a dead
+path held the call for TCP's entire retransmission schedule, on the task that
+draws the screen. It is now a non-blocking connect with a deadline, so a host
+that cannot be reached fails and says so rather than freezing the device.
 
 #### Without the Tailscale firmware: a relay
 

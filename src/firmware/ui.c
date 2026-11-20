@@ -223,7 +223,10 @@ static void clear(void) {
        terminal is left by the front door. The Tailscale client needs a large
        run of memory each time it re-registers - which it does by itself, after
        any interruption - and it was failing to find one because this was still
-       held from a session that had finished. term_session() takes it again. */
+       held from a session that had finished. term_session() takes it again.
+       The connection goes with it: a session whose state has been freed can
+       never be read again, so a socket left open would only be orphaned. */
+    if (ui.terminal) pim_telnet_close();
     term_memory_release();
     if (ui.timer) { lv_timer_delete(ui.timer); ui.timer = NULL; }
     ui.game = GAME_NONE; ui.terminal = false; term_is_ssh = false;
@@ -1546,6 +1549,15 @@ static bool term_memory_ensure(void) {
 /* Released when a session is finished with, and when the Tailscale client
    starts, which is the moment the memory is most wanted elsewhere. */
 static void term_memory_release(void) {
+    if (term_memory == NULL) return;
+    /* Wiped first: it has held a private key's text and a session's keys, and
+       the allocator hands freed memory to the next caller as it is. The
+       volatile pointer keeps the compiler from dropping a store to memory
+       that is about to be freed. */
+    {
+        volatile uint8_t *bytes = (volatile uint8_t *)term_memory;
+        for (size_t i = 0; i < sizeof(*term_memory); i++) bytes[i] = 0;
+    }
     free(term_memory);
     term_memory = NULL;
 }
@@ -1583,6 +1595,15 @@ static void tz_text(char *out, size_t size) {
     snprintf(out, size, "UTC%c%02d:%02d", minutes < 0 ? '-' : '+', absolute / 60, absolute % 60);
 }
 static void wifi_ready_message(const char *address) {
+    if (!pim_wifi_web_running()) {
+        /* Joined, but nothing is listening: offering an address and a PIN for
+           it would send someone to a page that does not load. */
+        snprintf(ui.file_text, sizeof(ui.file_text),
+                 "Connected as %s.\n\nThe web PIM is not running%s.",
+                 address, pim_ts_state() != PIM_TS_OFF ? " while Tailscale is on" : ": not enough memory");
+        message("Wi-Fi ready", ui.file_text);
+        return;
+    }
     snprintf(ui.file_text, sizeof(ui.file_text),
              "Open http://%s:8080\nin a phone or PC browser.\nPIN: %s\n\n"
              "curl -H 'Cookie: pim=%s' \\\n --data-binary @file http://%s:8080/upload/name\n\n"
@@ -2144,7 +2165,7 @@ static void host_connect(lv_event_t *event) {
     busy("Connecting...", address);
     if (!pim_telnet_open(address, port)) {
         host_form(NULL);
-        message("Connection failed", "Could not reach that host. Check the address, the port and the relay.");
+        message("Connection failed", "Could not reach that host. For a tailnet address, check Tailscale is connected.");
         return;
     }
     snprintf(term_title, sizeof(term_title), "%s", host.alias[0] != '\0' ? host.alias : address);
@@ -2343,7 +2364,7 @@ static void term_keys_screen(lv_event_t *event) {
     lv_obj_set_pos(list, 8, 30); lv_obj_set_size(list, 304, 200); crt_style(list, true);
     if (key_list.count == 0) {
         lv_obj_t *item = lv_label_create(list);
-        lv_label_set_text(item, "No keys found in /PIM/term_memory->ssh.");
+        lv_label_set_text(item, "No keys found in /PIM/ssh.");
         crt_style(item, false);
     }
     for (size_t i = 0; i < key_list.count; i++) {

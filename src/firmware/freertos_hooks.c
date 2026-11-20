@@ -117,31 +117,3 @@ void vApplicationGetTimerTaskMemory(StaticTask_t **buffer, StackType_t **stack, 
     *stack = timer_stack;
     *size = configTIMER_TASK_STACK_DEPTH;
 }
-
-/* ---- who suspended the scheduler ----
-
-   A wait on an event group with a timeout is illegal while the scheduler is
-   suspended, and the client does exactly that once registration finishes. The
-   suspension is therefore ours, somewhere, and unbalanced. Rather than reason
-   about which of the many callers it is, every suspend records where it came
-   from; the failed assertion carries that address through the reboot and
-   addr2line turns it into a line. These are linker-wrapped, so the kernel and
-   its heap go through them without being edited. */
-void *pim_last_suspender;
-int pim_suspend_depth;
-
-extern void __real_vTaskSuspendAll(void);
-extern BaseType_t __real_xTaskResumeAll(void);
-void __wrap_vTaskSuspendAll(void);
-BaseType_t __wrap_xTaskResumeAll(void);
-
-void __wrap_vTaskSuspendAll(void) {
-    pim_last_suspender = __builtin_return_address(0);
-    pim_suspend_depth++;
-    __real_vTaskSuspendAll();
-}
-
-BaseType_t __wrap_xTaskResumeAll(void) {
-    pim_suspend_depth--;
-    return __real_xTaskResumeAll();
-}

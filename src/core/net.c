@@ -322,11 +322,11 @@ pim_ics_result_t pim_ics_import(pim_database_t *database, const char *text) {
             if (strcmp(line, "SUMMARY") == 0) unescape_text(item.summary, sizeof(item.summary), colon);
             else if (strcmp(line, "DESCRIPTION") == 0) unescape_text(item.description, sizeof(item.description), colon);
             else if (strcmp(line, "DTSTART") == 0) {
-                bool date_only;
+                bool date_only = false;   /* parse_datetime may fail before setting it */
                 item.have_start = parse_datetime(colon, &item.start_date, &item.start_minutes, &date_only);
                 item.start_date_only = date_only;
             } else if (strcmp(line, "DTEND") == 0) {
-                bool date_only;
+                bool date_only = false;   /* parse_datetime may fail before setting it */
                 item.have_end = parse_datetime(colon, &item.end_date, &item.end_minutes, &date_only);
             } else if (strcmp(line, "STATUS") == 0) item.completed = strcasecmp(colon, "COMPLETED") == 0;
             else if (strcmp(line, "PERCENT-COMPLETE") == 0) item.completed = atoi(colon) >= 100;

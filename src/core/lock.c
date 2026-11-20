@@ -100,10 +100,15 @@ bool pim_lock_set(const char *path, const char *pin) {
     snprintf(temporary, sizeof(temporary), "%s.tmp", path);
     file = fopen(temporary, "wb");
     if (file == NULL) return false;
-    if (fprintf(file, "pin=%u:%s:%s\n", PIM_LOCK_ROUNDS, salt_hex, hash_hex) <= 0 ||
-        fclose(file) != 0) {
-        remove(temporary);
-        return false;
+    {
+        /* Both always run: written as one condition, a failed write skipped
+           fclose and left the file open - and FatFS has only a few handles. */
+        bool written = fprintf(file, "pin=%u:%s:%s\n", PIM_LOCK_ROUNDS, salt_hex, hash_hex) > 0;
+        bool closed = fclose(file) == 0;
+        if (!written || !closed) {
+            remove(temporary);
+            return false;
+        }
     }
     remove(path);
     return rename(temporary, path) == 0;

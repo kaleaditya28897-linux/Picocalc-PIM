@@ -38,7 +38,7 @@ static void test_host_records(void) {
     snprintf(host.alias, sizeof(host.alias), "nas");
     CHECK(!pim_host_valid(&host));
     snprintf(host.address, sizeof(host.address), "nas.tail1a2b.ts.net");
-    snprintf(host.user, sizeof(host.user), "aditya");
+    snprintf(host.user, sizeof(host.user), "user");
     CHECK(pim_host_valid(&host));
 
     /* with no relay the address is dialled directly */
@@ -54,7 +54,7 @@ static void test_host_records(void) {
     CHECK(strcmp(address, "192.168.1.9") == 0 && port == 2200);
 
     pim_host_summary(&host, line, sizeof(line));
-    CHECK(strcmp(line, "nas  ssh aditya@nas.tail1a2b.ts.net:22 via 192.168.1.9:2200") == 0);
+    CHECK(strcmp(line, "nas  ssh user@nas.tail1a2b.ts.net:22 via 192.168.1.9:2200") == 0);
 
     /* a tab or a control character would break the config file */
     snprintf(host.alias, sizeof(host.alias), "bad\tname");
@@ -102,7 +102,7 @@ static void test_host_files(void) {
     pim_host_init(&host, PIM_HOST_SSH);
     snprintf(host.alias, sizeof(host.alias), "nas");
     snprintf(host.address, sizeof(host.address), "nas.tail1a2b.ts.net");
-    snprintf(host.user, sizeof(host.user), "aditya");
+    snprintf(host.user, sizeof(host.user), "user");
     snprintf(host.key, sizeof(host.key), "picocalc");
     snprintf(host.relay, sizeof(host.relay), "192.168.1.9");
     host.relay_port = 2200;
@@ -118,7 +118,7 @@ static void test_host_files(void) {
     CHECK(loaded.count == 2);
     CHECK(strcmp(loaded.hosts[0].alias, "nas") == 0);
     CHECK(loaded.hosts[0].kind == PIM_HOST_SSH);
-    CHECK(strcmp(loaded.hosts[0].user, "aditya") == 0);
+    CHECK(strcmp(loaded.hosts[0].user, "user") == 0);
     CHECK(strcmp(loaded.hosts[0].key, "picocalc") == 0);
     CHECK(strcmp(loaded.hosts[0].relay, "192.168.1.9") == 0);
     CHECK(loaded.hosts[0].relay_port == 2200);

@@ -20,16 +20,13 @@
 
 #define PIM_TS_AUTHKEY_MAX 128
 #define PIM_TS_NAME_MAX 32
-#define PIM_TS_CONTROL_MAX 64
 #define PIM_TS_ADDRESS_MAX 40          /* "100.x.y.z", with room for a v6 one */
 #define PIM_TS_MESSAGE_MAX 64
 
 typedef struct {
     char authkey[PIM_TS_AUTHKEY_MAX + 1];
     char name[PIM_TS_NAME_MAX + 1];     /* the name on the tailnet */
-    char control[PIM_TS_CONTROL_MAX + 1]; /* empty for Tailscale's own control plane */
     uint16_t derp_region;               /* 0 lets the client keep its default */
-    bool verify_derp_tls;
 } pim_ts_config_t;
 
 void pim_ts_config_init(pim_ts_config_t *config);

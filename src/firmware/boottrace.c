@@ -64,15 +64,12 @@ void pim_boot_trace_init(void) {
             task[2] = (char)((packed >> 16) & 0xff);
             task[3] = (char)((packed >> 24) & 0xff);
             task[4] = '\0';
-            printf("  task %s  suspend depth %d  last suspended from %08lx\n",
-                   task, (int)watchdog_hw->scratch[7],
-                   (unsigned long)watchdog_hw->scratch[5]);
+            printf("  in task %s\n", task);
         }
         if (failed_kind == PIM_FAULT_HARD) {
-            /* Left by the fault handler, which could not print them itself.
-               cfsr says what kind of access failed; bfar, when the address is
-               exact, says which address; lr says who called the code that
-               faulted. */
+            /* Left by the fault handler, which could not print them itself:
+               cfsr says what kind of access failed, and r3 and r0 are the
+               registers most often holding the pointer that caused it. */
             printf("  cfsr %08lx  r3 %08lx  r0 %08lx\n",
                    (unsigned long)watchdog_hw->scratch[5],
                    (unsigned long)watchdog_hw->scratch[6],
@@ -125,24 +122,18 @@ bool pim_boot_skip_wifi(void) {
 
 /* What FreeRTOS's configASSERT calls. Separate from pim_boot_fault so that
    FreeRTOSConfig.h, which the assembler also reads and so cannot include this
-   module's header, needs no knowledge of its types. */
-/* What FreeRTOS's configASSERT calls, so it only ever fires in the build that
-   has a kernel. The polled build compiles it and never reaches it. */
+   module's header, needs no knowledge of its types. Only the build with a
+   kernel ever reaches it. */
 void pim_assert_failed(unsigned line) {
 #if PIM_TAILSCALE
-    /* Carried through the reboot alongside the line: which task was running,
-       how deep the scheduler suspension was, and who last suspended it. */
-    extern void *pim_last_suspender;
-    extern int pim_suspend_depth;
+    /* Carried through the reboot alongside the line: which task was running. */
     const char *name = pcTaskGetName(NULL);
     unsigned packed = 0;
     int i;
     for (i = 0; i < 4 && name != NULL && name[i] != '\0'; i++) {
         packed |= (unsigned)(unsigned char)name[i] << (8 * i);
     }
-    watchdog_hw->scratch[5] = (unsigned)(uintptr_t)pim_last_suspender;
     watchdog_hw->scratch[6] = packed;
-    watchdog_hw->scratch[7] = (unsigned)pim_suspend_depth;
 #endif
     pim_boot_fault(PIM_FAULT_ASSERT, line);
 }

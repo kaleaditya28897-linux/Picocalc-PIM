@@ -18,13 +18,17 @@
 #define LWIP_CORE_LOCK_UNMARK_HOLDER 1
 #define LWIP_CORE_LOCK_QUERY_HOLDER 2
 
-static inline int sys_thread_tcpip(int query) {
-    /* The handle is looked up by name once: xTaskGetHandle walks the task
-       lists, and this sits on the send path. */
-    static TaskHandle_t tcpip_task;
-    if (query != LWIP_CORE_LOCK_QUERY_HOLDER) return 0;
-    if (tcpip_task == NULL) tcpip_task = xTaskGetHandle(TCPIP_THREAD_NAME);
-    return tcpip_task != NULL && tcpip_task == xTaskGetCurrentTaskHandle();
-}
+/* True when the calling task holds lwIP's core lock. Defined in ts_platform.c.
+
+   This used to answer a different question - "is this the tcpip thread?" -
+   and that is wrong whenever core locking is on, because then any task that
+   calls the socket API runs lwIP's code itself while holding the lock. The UI
+   task did exactly that inside connect(): its SYN went out through WireGuard,
+   the send callback was told "you do not hold the lock", queued the send to
+   the tcpip thread and waited - and the tcpip thread could not run without the
+   lock the UI task was holding. Every network task stopped, and the idle task
+   kept the watchdog fed, so the device simply froze. Only direct paths went
+   through this callback, which is why peers reached over DERP still worked. */
+int sys_thread_tcpip(int query);
 
 #endif

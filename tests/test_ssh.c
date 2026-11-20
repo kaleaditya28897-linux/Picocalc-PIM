@@ -360,6 +360,16 @@ static void test_key_creation(void) {
     /* an existing name is refused rather than overwritten, and a bad name too */
     CHECK(!pim_ssh_key_create(KEY_DIR_NEW, "onboard", NULL));
     CHECK(!pim_ssh_key_create(KEY_DIR_NEW, "../escape", NULL));
+
+    /* A comment too long for the key's private section is refused, and the
+       call returns: padding that section used to loop for ever once it was
+       full, because a full buffer stops advancing. */
+    {
+        static char long_comment[2048];
+        memset(long_comment, 'c', sizeof(long_comment) - 1);
+        long_comment[sizeof(long_comment) - 1] = '\0';
+        CHECK(!pim_ssh_key_create(KEY_DIR_NEW, "toolong", long_comment));
+    }
     system("rm -rf " KEY_DIR_NEW);
 }
 

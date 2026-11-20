@@ -522,7 +522,11 @@ bool pim_ssh_key_create(const char *directory, const char *name, const char *com
             blob_put_string(&sb, secret, 64);
             blob_put_text(&sb, comment);
             pad = 1;
-            while ((sb.used + 0) % 8 != 0) { uint8_t byte = (uint8_t)pad++; blob_put(&sb, &byte, 1); }
+            /* Pad to a multiple of eight. The overflow test is what ends the
+               loop when the section is already full: blob_put then leaves
+               `used` where it is, and without it this spun for ever on a
+               comment long enough to fill the buffer. */
+            while (!sb.overflow && sb.used % 8 != 0) { uint8_t byte = (uint8_t)pad++; blob_put(&sb, &byte, 1); }
             if (sb.overflow) return false;
 
             blob_put(&cb, "openssh-key-v1\0", 15);

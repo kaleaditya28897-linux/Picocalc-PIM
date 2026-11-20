@@ -354,9 +354,15 @@ esp_err_t nvs_set_blob(nvs_handle_t handle, const char *key, const void *value, 
        cache intact rather than a half-written one. */
     file = fopen(temporary, "wb");
     if (file == NULL) return ESP_FAIL;
-    if (fwrite(value, 1, length, file) != length || fclose(file) != 0) {
-        remove(temporary);
-        return ESP_FAIL;
+    {
+        /* Both always run: as one condition a short write skipped fclose and
+           left a FatFS handle open, and there are only a few of those. */
+        bool written = fwrite(value, 1, length, file) == length;
+        bool closed = fclose(file) == 0;
+        if (!written || !closed) {
+            remove(temporary);
+            return ESP_FAIL;
+        }
     }
     remove(path);
     return rename(temporary, path) == 0 ? ESP_OK : ESP_FAIL;
@@ -531,4 +537,29 @@ void vPortInitialiseBlocks(void) { }
 size_t xPortGetFreeHeapSize(void) {
     extern size_t pim_ts_free_memory(void);
     return pim_ts_free_memory();
+}
+
+/* ---- who holds lwIP's core lock ----
+
+   See esp_lwip_ext.h for why the question matters. With the FreeRTOS build of
+   the SDK, LOCK_TCPIP_CORE() takes the cyw43 async context's lock, which is a
+   recursive FreeRTOS mutex - so the owner can simply be asked. */
+#include "pico/cyw43_arch.h"
+#include "pico/async_context_freertos.h"
+#include "esp_compat/esp_lwip_ext.h"
+
+int sys_thread_tcpip(int query) {
+    async_context_freertos_t *context;
+    if (query != LWIP_CORE_LOCK_QUERY_HOLDER) return 0;
+    context = (async_context_freertos_t *)cyw43_arch_async_context();
+    if (context != NULL && context->lock_mutex != NULL) {
+        return xSemaphoreGetMutexHolder(context->lock_mutex) == xTaskGetCurrentTaskHandle();
+    }
+    /* Before the radio is up there is no lock to hold; lwIP calls made then
+       come from the tcpip thread or nowhere. */
+    {
+        static TaskHandle_t tcpip_task;
+        if (tcpip_task == NULL) tcpip_task = xTaskGetHandle(TCPIP_THREAD_NAME);
+        return tcpip_task != NULL && tcpip_task == xTaskGetCurrentTaskHandle();
+    }
 }

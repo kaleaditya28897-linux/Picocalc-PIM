@@ -44,6 +44,78 @@ struct microlink_tcp_socket {
     bool connected;
 };
 
+/* --- PicoDeck change; see PROVENANCE.md ---
+
+   A bounded connect. SO_SNDTIMEO was set above in the expectation that it
+   limits connect(), and on lwIP it does not: netconn_connect waits on its
+   completion semaphore with a timeout of zero - wait for ever - and
+   send_timeout is consulted only when closing. So a peer whose path silently
+   drops packets held this call for TCP's whole retransmission schedule, well
+   over a minute. That call is made from the task that draws the screen, so the
+   whole device appeared to freeze instead of the connection simply failing.
+
+   Non-blocking connect, then select() with the deadline the caller asked for,
+   then back to blocking for the session itself (whose reads and writes do
+   honour SO_RCVTIMEO and SO_SNDTIMEO). Returns 0 on success, -1 otherwise.
+
+   F_GETFL, F_SETFL, O_NONBLOCK and select come from lwip/sockets.h below, not
+   from the newlib headers: lwIP guards its own definitions with #ifndef, so
+   including <fcntl.h> first gave this file O_NONBLOCK 0x4000 while lwIP was
+   compiled with 1 - and its F_SETFL, masking against its own value, refused the
+   unknown bit with ENOSYS. Every connection failed with "errno=38". */
+static int pim_connect_bounded(int fd, const struct sockaddr *addr, socklen_t len,
+                               uint32_t timeout_ms)
+{
+    int on = 1, off = 0;
+    int result;
+
+    /* FIONBIO through lwip_ioctl, not O_NONBLOCK through fcntl. The fcntl route
+       depends on O_NONBLOCK meaning the same thing here as inside lwIP, and it
+       did not: newlib's value reached this file through some header, lwIP's
+       F_SETFL rejected the unknown bit with ENOSYS, and every connection on the
+       device failed with errno 38. FIONBIO is lwIP's own request and newlib
+       does not define it. */
+    if (lwip_ioctl(fd, FIONBIO, &on) != 0) {
+        /* Never let the bounding itself cost the connection: fall back to the
+           plain blocking connect, which works and is merely unbounded. */
+        ESP_LOGW(TAG, "FIONBIO refused (errno=%d); connecting unbounded", errno);
+        return connect(fd, addr, len) == 0 ? 0 : -1;
+    }
+
+    result = lwip_connect(fd, addr, len);
+    if (result != 0 && errno == EINPROGRESS) {
+        fd_set writable, failed;
+        struct timeval tv;
+        if (timeout_ms == 0) timeout_ms = 15000;
+        tv.tv_sec = timeout_ms / 1000;
+        tv.tv_usec = (timeout_ms % 1000) * 1000;
+        FD_ZERO(&writable);
+        FD_SET(fd, &writable);
+        FD_ZERO(&failed);
+        FD_SET(fd, &failed);
+        result = lwip_select(fd + 1, NULL, &writable, &failed, &tv);
+        if (result == 0) {
+            ESP_LOGW(TAG, "connect timed out after %u ms", (unsigned)timeout_ms);
+            errno = ETIMEDOUT;
+            result = -1;
+        } else if (result > 0) {
+            /* Writable can also mean "finished, with an error". */
+            int so_error = 0;
+            socklen_t so_len = sizeof(so_error);
+            if (lwip_getsockopt(fd, SOL_SOCKET, SO_ERROR, &so_error, &so_len) < 0) so_error = EIO;
+            if (so_error != 0) {
+                errno = so_error;
+                result = -1;
+            } else {
+                result = 0;
+            }
+        }
+    }
+
+    (void)lwip_ioctl(fd, FIONBIO, &off);     /* the session wants blocking */
+    return result == 0 ? 0 : -1;
+}
+
 /* ============================================================================
  * Public API
  * ========================================================================== */
@@ -160,7 +232,7 @@ microlink_tcp_socket_t *microlink_tcp_connect(microlink_t *ml, uint32_t dest_ip,
 
     int64_t t_start = esp_timer_get_time();
 
-    if (connect(fd, (struct sockaddr *)&dest, sizeof(dest)) != 0) {
+    if (pim_connect_bounded(fd, (struct sockaddr *)&dest, sizeof(dest), remaining) != 0) {
         int err = errno;
         ESP_LOGE(TAG, "connect() to %s:%u failed: errno=%d", ip_str, dest_port, err);
 
@@ -189,7 +261,7 @@ microlink_tcp_socket_t *microlink_tcp_connect(microlink_t *ml, uint32_t dest_ip,
             setsockopt(fd, SOL_SOCKET, SO_KEEPALIVE, &keepalive, sizeof(keepalive));
             setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &nodelay, sizeof(nodelay));
 
-            if (connect(fd, (struct sockaddr *)&dest, sizeof(dest)) != 0) {
+            if (pim_connect_bounded(fd, (struct sockaddr *)&dest, sizeof(dest), remaining) != 0) {
                 ESP_LOGE(TAG, "Retry connect() failed: errno=%d", errno);
                 close(fd);
                 return NULL;

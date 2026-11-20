@@ -11,6 +11,7 @@
    reports, which is what the screen reads. */
 
 #include "pim/tailscale.h"
+#include "pim/wifi.h"
 
 #include <stdio.h>
 #include <string.h>
@@ -79,7 +80,6 @@ bool pim_ts_start(const pim_ts_config_t *config) {
     /* The peer table costs RAM per entry and this tailnet is not large. */
     ml.max_peers = 16;
     ml.streaming_map_fetch = true;
-    if (live.control[0] != '\0') ml.ctrl_host = live.control;
 
     pim_boot_stage(PIM_BOOT_TS_START);
     printf("tailscale: %u KB free before init\n", (unsigned)(pim_ts_free_memory() / 1024));
@@ -109,6 +109,9 @@ bool pim_ts_start(const pim_ts_config_t *config) {
 
 void pim_ts_stop(void) {
     if (client == NULL) return;
+    /* First, while the client still exists: the tunnel socket is the client's,
+       and a session left holding it would read freed memory afterwards. */
+    pim_wifi_tunnel_drop();
     microlink_stop(client);
     microlink_destroy(client);
     client = NULL;

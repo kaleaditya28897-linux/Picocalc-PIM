@@ -3,6 +3,8 @@ build/
 *.elf
 *.map
 *.uf2
+# ...except the published images, which are deliberate
+!release/*.uf2
 *.bin
 
 # Editor files
@@ -33,3 +35,18 @@ id_*
 !assets/**/*.pub
 private/
 pim_sim_root/
+
+# The rest of what lives on the card. Wi-Fi passwords, the PIN's hash, pinned
+# SSH host keys, and the PIM data itself - appointments, notes, journal. A copy
+# of the card should never land in a checkout; if one does, it stays out.
+wifi.cfg
+lock.cfg
+known_hosts
+pim.dat
+journal/
+/PIM/
+/sd/
+*.log
+
+# Local agent settings
+.claude/

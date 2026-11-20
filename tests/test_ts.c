@@ -62,7 +62,6 @@ static void test_defaults(void) {
     pim_ts_config_init(&config);
     CHECK(strcmp(config.name, "picocalc") == 0);
     CHECK(config.authkey[0] == '\0');
-    CHECK(config.control[0] == '\0');
     CHECK(config.derp_region == 0);
 }
 
@@ -76,13 +75,22 @@ static void test_load(void) {
         "\n"
         "authkey=" SAMPLE_KEY "\n"
         "name=picodeck\n"
-        "derp=6\n"
-        "verifyderp=1\n");
+        "derp=6\n");
     CHECK(pim_ts_config_load(path, &config));
     CHECK(strcmp(config.authkey, SAMPLE_KEY) == 0);
     CHECK(strcmp(config.name, "picodeck") == 0);
     CHECK(config.derp_region == 6);
-    CHECK(config.verify_derp_tls);
+
+    /* Comments after a value, and trailing spaces, as the README shows them:
+       the key must survive them, not be dropped as malformed. */
+    write_file(path,
+        "authkey=" SAMPLE_KEY "   # optional\n"
+        "name=picocalc            # the name on the tailnet\n"
+        "derp=6 \t\n");
+    CHECK(pim_ts_config_load(path, &config));
+    CHECK(strcmp(config.authkey, SAMPLE_KEY) == 0);
+    CHECK(strcmp(config.name, "picocalc") == 0);
+    CHECK(config.derp_region == 6);
 
     /* Carriage returns: the file is likely written on another machine. */
     write_file(path, "authkey=" SAMPLE_KEY "\r\nname=crlf\r\nderp=9\r\n");
@@ -108,10 +116,17 @@ static void test_load(void) {
     CHECK(strcmp(config.name, "picocalc") == 0);
 
     /* Junk does not get mistaken for settings, and nothing overruns. */
-    write_file(path, "authkey\nname\n=\nderp=notanumber\nderp=99999999999\n"
-                     "control=https://headscale.example.org\n");
+    write_file(path, "authkey\nname\n=\nderp=notanumber\nderp=99999999999\n");
     CHECK(!pim_ts_config_load(path, &config));
-    CHECK(strcmp(config.control, "https://headscale.example.org") == 0);
+    CHECK(config.derp_region == 0);
+
+    /* A card from an older build carries two settings that were dropped
+       because they never took effect. They are passed over, not refused. */
+    write_file(path, "authkey=" SAMPLE_KEY "\nname=older\n"
+                     "control=https://headscale.example.org\nderp=6\nverifyderp=1\n");
+    CHECK(pim_ts_config_load(path, &config));
+    CHECK(strcmp(config.name, "older") == 0);
+    CHECK(config.derp_region == 6);
 
     /* A name longer than the field is cut, not written past. */
     write_file(path, "authkey=" SAMPLE_KEY "\nname=0123456789012345678901234567890123456789\n");
@@ -127,17 +142,13 @@ static void test_round_trip(void) {
     pim_ts_config_init(&saved);
     snprintf(saved.authkey, sizeof(saved.authkey), "%s", SAMPLE_KEY);
     snprintf(saved.name, sizeof(saved.name), "%s", "picodeck");
-    snprintf(saved.control, sizeof(saved.control), "%s", "https://ctrl.example.org");
     saved.derp_region = 6;
-    saved.verify_derp_tls = true;
 
     CHECK(pim_ts_config_save(path, &saved));
     CHECK(pim_ts_config_load(path, &loaded));
     CHECK(strcmp(loaded.authkey, saved.authkey) == 0);
     CHECK(strcmp(loaded.name, saved.name) == 0);
-    CHECK(strcmp(loaded.control, saved.control) == 0);
     CHECK(loaded.derp_region == saved.derp_region);
-    CHECK(loaded.verify_derp_tls == saved.verify_derp_tls);
     remove(path);
 }
 
@@ -157,7 +168,7 @@ static void test_tailnet_addresses(void) {
     CHECK(!pim_ts_is_tailnet_address("127.0.0.1"));
     CHECK(!pim_ts_is_tailnet_address("10.0.0.1"));
     /* Not a dotted quad at all: a name needs the tailnet's DNS, not this. */
-    CHECK(!pim_ts_is_tailnet_address("pvehome"));
+    CHECK(!pim_ts_is_tailnet_address("myserver"));
     CHECK(!pim_ts_is_tailnet_address("nas.tail1a2b.ts.net"));
     CHECK(!pim_ts_is_tailnet_address("fd7a:115c:a1e0::1"));
     CHECK(!pim_ts_is_tailnet_address(""));

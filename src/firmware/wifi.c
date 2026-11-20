@@ -2,6 +2,7 @@
 #include "pim/wifi.h"
 #if PIM_TAILSCALE
 #include "microlink.h"
+#include "pim/tailscale.h"
 /* src/firmware/tailscale.c: the running client, or NULL when it is not up. */
 microlink_t *pim_ts_client(void);
 #endif
@@ -239,7 +240,6 @@ static err_t client_receive(void *arg, struct tcp_pcb *pcb, struct pbuf *p, err_
         finish_client(pcb);
         return client_aborted ? ERR_ABRT : ERR_OK;
     }
-    if (telnet_rx == NULL) { pbuf_free(p); return ERR_OK; }
     tcp_recved(pcb, p->tot_len);
     if (!reply.active) {
         if (request_length + p->tot_len > REQUEST_MAX) {
@@ -358,6 +358,12 @@ bool pim_wifi_connect(const char *raw_ssid, const char *raw_password, char *addr
     if (ssid[0] == '\0' || password[0] == '\0') return false;
     wifi_error[0] = '\0';
     if (!wifi_init()) return false;
+#if PIM_TAILSCALE
+    /* Joining starts by leaving the current network, which pulls the link out
+       from under a running client; it is stopped cleanly first, along with any
+       session over its tunnel. */
+    pim_ts_stop();
+#endif
     static const uint32_t auth_modes[] = {CYW43_AUTH_WPA2_MIXED_PSK, CYW43_AUTH_WPA2_AES_PSK,
                                           CYW43_AUTH_WPA3_WPA2_AES_PSK};
     int joined = -1, codes[3] = {0, 0, 0};
@@ -392,11 +398,14 @@ bool pim_wifi_connect(const char *raw_ssid, const char *raw_password, char *addr
         return false;
     }
     progress("Starting server");
-    if (!start_server() || netif_default == NULL) {
-        snprintf(wifi_error, sizeof(wifi_error), "Web server failed to start");
+    if (netif_default == NULL) {
+        snprintf(wifi_error, sizeof(wifi_error), "Joined, but no network interface came up");
         wifi_up = false;
         return false;
     }
+    /* The web PIM is optional and the network is not: a server that cannot get
+       its buffers is reported, but the join stands, so SSH still works. */
+    if (!start_server()) snprintf(wifi_error, sizeof(wifi_error), "Web PIM not started: not enough memory");
     progress("Making PIN");
     number = get_rand_32() % 10000;
     snprintf(web.pin, sizeof(web.pin), "%04u", (unsigned)number);
@@ -598,6 +607,10 @@ static err_t telnet_receive(void *arg, struct tcp_pcb *pcb, struct pbuf *p, err_
         telnet_reset();
         return ERR_OK;
     }
+    /* The ring exists only while a LAN session is open. Nothing should arrive
+       without one, but if it does it is refused rather than written through a
+       NULL pointer. */
+    if (telnet_rx == NULL) { tcp_recved(pcb, p->tot_len); pbuf_free(p); return ERR_OK; }
     /* Take all of it or none of it. Returning ERR_MEM without freeing tells lwIP
        to keep the data and offer it again, which leaves the window closed until
        the terminal has drained what it already has. Acknowledging bytes that
@@ -642,7 +655,7 @@ static err_t telnet_connected(void *arg, struct tcp_pcb *pcb, err_t error) {
    with no relay on another computer.
 
    Tailscale hands out addresses from 100.64.0.0/10. A name is put to the
-   control plane's DNS, so an alias like "pve1" reaches the right machine even
+   control plane's DNS, so an alias like "nas" reaches the right machine even
    though the local network has never heard of it. */
 static microlink_tcp_socket_t *tunnel;
 
@@ -665,14 +678,22 @@ static void tunnel_drop(void) {
 }
 #endif
 
+#if PIM_TAILSCALE
+/* The tunnel socket belongs to the Tailscale client, so it has to be closed
+   before the client is destroyed: otherwise this file is left holding a
+   pointer into freed memory and the terminal's next read uses it. Called from
+   pim_ts_stop. */
+void pim_wifi_tunnel_drop(void) {
+    tunnel_drop();
+}
+#endif
+
 bool pim_telnet_open(const char *host, uint16_t port) {
     ip_addr_t address;
     connect_t state = {false, ERR_OK};
     absolute_time_t end;
     if (!wifi_up || host == NULL || host[0] == '\0' || port == 0) return false;
     pim_telnet_close();
-    if (telnet_rx == NULL) telnet_rx = malloc(TELNET_RX_MAX);
-    if (telnet_rx == NULL) return false;
 #if PIM_TAILSCALE
     {
         uint32_t vpn_ip;
@@ -684,6 +705,10 @@ bool pim_telnet_open(const char *host, uint16_t port) {
         }
     }
 #endif
+    /* Only the LAN path fills this ring; a tunnel session reads its socket
+       directly, so it is not allocated for one. */
+    if (telnet_rx == NULL) telnet_rx = malloc(TELNET_RX_MAX);
+    if (telnet_rx == NULL) return false;
     if (!resolve(host, &address)) return false;
     NET_BEGIN();
     telnet = tcp_new_ip_type(IP_GET_TYPE(&address));
@@ -787,12 +812,14 @@ bool pim_telnet_write(const uint8_t *data, size_t length) {
 }
 
 void pim_wifi_web_stop(void) {
-    if (client != NULL) finish_client(client);
     NET_BEGIN();
+    if (client != NULL) finish_client(client);
     if (listener != NULL) { tcp_close(listener); listener = NULL; }
     NET_END();
     free_server_buffers();
 }
+
+bool pim_wifi_web_running(void) { return listener != NULL; }
 
 bool pim_wifi_web_start(void) {
     if (!wifi_up) return false;
@@ -802,9 +829,14 @@ bool pim_wifi_web_start(void) {
 /* Powers the radio down; it is the largest battery draw once a network is joined. */
 void pim_wifi_off(void) {
     if (!wifi_initialized) return;
+#if PIM_TAILSCALE
+    /* Before the radio goes: the client's tasks run on this network stack, and
+       deinitialising it under them leaves them using freed state. */
+    pim_ts_stop();
+#endif
     pim_telnet_close();
-    if (client != NULL) finish_client(client);
     NET_BEGIN();
+    if (client != NULL) finish_client(client);
     if (listener != NULL) { tcp_close(listener); listener = NULL; }
     NET_END();
     free_server_buffers();
@@ -817,7 +849,12 @@ void pim_wifi_off(void) {
 void pim_wifi_poll(void) {
     if (!wifi_initialized) return;
     cyw43_arch_poll();
+    /* An open session, or a Tailscale client - which works in the background
+       with no other sign of life here - keeps the radio on. */
     if (telnet_open_flag) touch();
+#if PIM_TAILSCALE
+    else if (pim_ts_client() != NULL) touch();
+#endif
     else if (client == NULL && to_ms_since_boot(get_absolute_time()) - wifi_activity_ms > WIFI_IDLE_OFF_MS) pim_wifi_off();
 }
 

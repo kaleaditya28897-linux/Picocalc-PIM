@@ -9,8 +9,9 @@
  *   authkey=tskey-auth-k...        what registers this device with the tailnet
  *   name=picocalc                  the name it appears under
  *   derp=9                         preferred relay region, 0 to leave it alone
- *   control=https://headscale...   only for a self-hosted control plane
- *   verifyderp=0                   whether to check relay certificates
+ *
+ * Anything else is ignored, so a card written by an older build - which also
+ * had control= and verifyderp=, settings that never took effect - still loads.
  */
 
 #define DEFAULT_NAME "picocalc"
@@ -61,20 +62,23 @@ bool pim_ts_config_load(const char *path, pim_ts_config_t *config) {
     file = fopen(path, "rb");
     if (file == NULL) return false;
     while (fgets(line, sizeof(line), file) != NULL) {
-        size_t length = strlen(line);
-        while (length > 0 && (line[length - 1] == '\n' || line[length - 1] == '\r')) line[--length] = '\0';
-        if (line[0] == '#' || line[0] == '\0') continue;
+        size_t length;
+        char *comment = strchr(line, '#');
+        /* A comment may follow a value on the same line, as in the README's
+           example. No setting can contain '#', so everything from one on is
+           dropped, and the spaces before it with it. */
+        if (comment != NULL) *comment = '\0';
+        length = strlen(line);
+        while (length > 0 && (line[length - 1] == '\n' || line[length - 1] == '\r' ||
+                              line[length - 1] == ' ' || line[length - 1] == '\t')) line[--length] = '\0';
+        if (line[0] == '\0') continue;
         if (strncmp(line, "authkey=", 8) == 0) {
             if (pim_ts_authkey_ok(line + 8)) copy_field(config->authkey, sizeof(config->authkey), line + 8);
         } else if (strncmp(line, "name=", 5) == 0 && line[5] != '\0') {
             copy_field(config->name, sizeof(config->name), line + 5);
-        } else if (strncmp(line, "control=", 8) == 0) {
-            copy_field(config->control, sizeof(config->control), line + 8);
         } else if (strncmp(line, "derp=", 5) == 0) {
             unsigned long value = strtoul(line + 5, NULL, 10);
             if (value <= 65535u) config->derp_region = (uint16_t)value;
-        } else if (strncmp(line, "verifyderp=", 11) == 0) {
-            config->verify_derp_tls = line[11] == '1';
         }
     }
     fclose(file);
@@ -93,9 +97,7 @@ bool pim_ts_config_save(const char *path, const pim_ts_config_t *config) {
     ok = fprintf(file, "# PicoDeck Tailscale settings. The auth key is a secret.\n") > 0;
     if (ok && config->authkey[0] != '\0') ok = fprintf(file, "authkey=%s\n", config->authkey) > 0;
     if (ok) ok = fprintf(file, "name=%s\n", config->name) > 0;
-    if (ok && config->control[0] != '\0') ok = fprintf(file, "control=%s\n", config->control) > 0;
     if (ok) ok = fprintf(file, "derp=%u\n", config->derp_region) > 0;
-    if (ok) ok = fprintf(file, "verifyderp=%d\n", config->verify_derp_tls ? 1 : 0) > 0;
     if (fclose(file) != 0 || !ok) { remove(temporary); return false; }
     remove(path);
     return rename(temporary, path) == 0;

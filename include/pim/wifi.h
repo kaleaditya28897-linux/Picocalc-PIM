@@ -29,12 +29,18 @@ const char *pim_wifi_pin(void);
 const char *pim_wifi_address(void);
 /* Disconnects and powers the radio off; also done automatically after 15 idle minutes. */
 void pim_wifi_off(void);
+/* Tailscale build: closes a terminal session running over the tunnel. The
+   socket belongs to the Tailscale client, so this runs before it is destroyed. */
+void pim_wifi_tunnel_drop(void);
 /* The web server, separately from the radio. Its request and response buffers
    are 29 KB, which on a 520 KB device is worth having back when something else
    needs a large run of memory - the Tailscale client, parsing a network map.
    Stopping it leaves the Wi-Fi connection and the terminal alone. */
 void pim_wifi_web_stop(void);
 bool pim_wifi_web_start(void);
+/* Whether the web PIM is listening: it is paused while Tailscale is up, and
+   is not started when there is not enough memory for its buffers. */
+bool pim_wifi_web_running(void);
 void pim_wifi_poll(void);
 
 /* Telnet transport: raw bytes in and out; protocol and terminal handling live in the core. */

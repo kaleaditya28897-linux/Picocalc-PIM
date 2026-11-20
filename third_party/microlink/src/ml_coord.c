@@ -1491,9 +1491,8 @@ static size_t pim_trim_netmap(char *body, size_t length)
        and whether what is being parsed is still well formed. If the text ends
        anywhere but on its closing braces, the trimming is at fault, not the
        memory. */
-    ESP_LOGI(TAG, "netmap trimmed: %u -> %u bytes, %u KB free, ends: %s",
-             (unsigned)length, (unsigned)trimmed, (unsigned)(pim_ts_free_memory() / 1024),
-             trimmed > 24 ? body + trimmed - 24 : body);
+    ESP_LOGI(TAG, "netmap trimmed: %u -> %u bytes, %u KB free",
+             (unsigned)length, (unsigned)trimmed, (unsigned)(pim_ts_free_memory() / 1024));
     return trimmed;
 }
 
@@ -2610,19 +2609,26 @@ static void lp_reset(microlink_t *ml) {
     memset(&ml->coord_st.lp, 0, sizeof(ml->coord_st.lp));
 }
 
-/* Grow *buf to hold at least need bytes: doubling from 8 KB, but never past
- * limit (limit >= need) so the last step doesn't overshoot to twice that. */
+/* Grow *buf to hold at least need bytes, never past limit (limit >= need).
+ * How it grows is described inside. */
 static bool lp_reserve(uint8_t **buf, size_t *cap, size_t need, size_t limit) {
     if (need <= *cap && *buf) return true;
-    size_t ncap = *cap ? *cap : 8192;
-    while (ncap < need) ncap *= 2;
-    if (ncap > limit && need <= limit) ncap = limit;
-    uint8_t *nb = ml_psram_malloc(ncap);
-    if (!nb) return false;
-    if (*buf) {
-        memcpy(nb, *buf, *cap);
-        free(*buf);
+    /* PicoDeck: doubling is fine while the buffer is small, but past 16 KB it
+       overshoots badly - a 33 KB network map took the buffer from 32 KB to
+       64 KB, and the copy needed both at once, 96 KB on a board with about
+       70 KB free. That failure was reported as the message being too big. So
+       a large buffer grows to what is needed plus an eighth, and realloc can
+       often extend it where it is without a copy at all. */
+    size_t ncap;
+    if (need <= 16384) {
+        ncap = *cap ? *cap : 8192;
+        while (ncap < need) ncap *= 2;
+    } else {
+        ncap = (need + need / 8 + 4095) & ~(size_t)4095;
     }
+    if (ncap > limit && need <= limit) ncap = limit;
+    uint8_t *nb = realloc(*buf, ncap);
+    if (!nb) return false;
     *buf = nb;
     *cap = ncap;
     return true;
@@ -2745,11 +2751,22 @@ static int lp_consume_h2(microlink_t *ml, ml_noise_state_t *noise, lp_h2_result_
                 r->stream5_heard = true;
                 if (f_len > 0) {
                     size_t need = ml->coord_st.lp.msg_len + f_len + 1;
-                    if (need > (size_t)ML_JSON_BUFFER_SIZE ||
-                        !lp_reserve(&ml->coord_st.lp.msg, &ml->coord_st.lp.msg_cap, need,
+                    /* PicoDeck: the two failures reported apart, with sizes.
+                       They were one message, and a failed allocation read as
+                       an oversized network map. */
+                    if (need > (size_t)ML_JSON_BUFFER_SIZE) {
+                        ESP_LOGE(TAG, "Long-poll message exceeds %u KB buffer: "
+                                 "have %u + frame %u = %u bytes; reconnecting",
+                                 (unsigned)(ML_JSON_BUFFER_SIZE / 1024),
+                                 (unsigned)ml->coord_st.lp.msg_len, (unsigned)f_len,
+                                 (unsigned)need);
+                        lp_reset(ml);
+                        return -1;
+                    }
+                    if (!lp_reserve(&ml->coord_st.lp.msg, &ml->coord_st.lp.msg_cap, need,
                                     (size_t)ML_JSON_BUFFER_SIZE)) {
-                        ESP_LOGE(TAG, "Long-poll message exceeds %u KB buffer; reconnecting",
-                                 (unsigned)(ML_JSON_BUFFER_SIZE / 1024));
+                        ESP_LOGE(TAG, "Long-poll: no memory to grow the message "
+                                 "buffer to %u bytes; reconnecting", (unsigned)need);
                         lp_reset(ml);
                         return -1;
                     }

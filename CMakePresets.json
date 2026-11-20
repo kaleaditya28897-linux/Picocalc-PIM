@@ -46,7 +46,7 @@
         "PICO_BOARD": "pico2_w",
         "PIM_ENABLE_TAILSCALE": "ON"
       },
-      "displayName": "Pico 2 W firmware with FreeRTOS and lwIP sockets (Tailscale work in progress)"
+      "displayName": "Pico 2 W firmware with FreeRTOS, lwIP sockets and the Tailscale client"
     }
   ],
   "buildPresets": [

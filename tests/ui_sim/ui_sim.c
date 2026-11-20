@@ -101,6 +101,7 @@ static int sim_wifi_off, sim_web_stops, sim_web_starts;
 void pim_wifi_off(void) { sim_wifi_off++; }
 void pim_wifi_web_stop(void) { sim_web_stops++; }
 bool pim_wifi_web_start(void) { sim_web_starts++; return true; }
+bool pim_wifi_web_running(void) { return sim_up; }
 
 /* A stand-in for the Tailscale client: the real one wants a radio and a
    tailnet. The screen's only job is to show what the client reports and to
