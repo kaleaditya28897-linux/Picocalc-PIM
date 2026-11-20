@@ -4,6 +4,7 @@
 #include "pim/sound.h"
 #include "pim/storage.h"
 #include "pim/telnet.h"
+#include "pim/vterm.h"
 #include "pim/web.h"
 
 #include <dirent.h>
@@ -544,6 +545,32 @@ static void test_web(void) {
     web_request("GET", "/file/pim.dat", "", true); CHECK(web_response.status == 400);
     web_request("GET", "/file/..%2Fx", "", true); CHECK(web_response.status == 400);
     web_request("POST", "/save", "name=wifi.cfg&text=x", true); CHECK(web_response.status == 400);
+
+    /* SSH keys live under /PIM/ssh on the card. The server runs on plain HTTP
+       behind a four-digit PIN, so it may accept a key but must never give one
+       back, list the folder, or put it in the manifest. */
+    mkdir("test_web_dir/ssh", 0777);
+    web_request("POST", "/upload/ssh/picocalc", "-----BEGIN OPENSSH PRIVATE KEY-----\nsecret\n", true);
+    CHECK(web_response.status == 201);
+    CHECK(read_text("test_web_dir/ssh/picocalc", exported, sizeof(exported)) > 0);
+    web_request("GET", "/file/ssh/picocalc", "", true);
+    CHECK(web_response.status == 403 && strstr(web_out, "secret") == NULL);
+    /* The public half is meant to be copied onto servers, so that one is served. */
+    web_request("POST", "/upload/ssh/picocalc.pub", "ssh-ed25519 AAAApublic picocalc\n", true);
+    CHECK(web_response.status == 201);
+    web_request("GET", "/file/ssh/picocalc.pub", "", true);
+    CHECK(web_response.status == 200 && strstr(web_out, "AAAApublic") != NULL);
+    web_request("GET", "/edit?name=ssh%2Fpicocalc", "", true);
+    CHECK(web_response.status == 403 && strstr(web_out, "secret") == NULL);
+    web_request("GET", "/files?dir=ssh", "", true);
+    CHECK(strstr(web_out, "picocalc") == NULL);
+    web_request("GET", "/files", "", true);
+    CHECK(strstr(web_out, "href='/files?dir=ssh'") == NULL && strstr(web_out, "not served") != NULL);
+    web_request("GET", "/manifest", "", true);
+    CHECK(web_response.status == 200 && strstr(web_out, "ssh/") == NULL);
+    remove("test_web_dir/ssh/picocalc");
+    remove("test_web_dir/ssh/picocalc.pub");
+    rmdir("test_web_dir/ssh");
     web_request("POST", "/save", "name=a%2F..%2Fb&text=x", true); CHECK(web_response.status == 400);
     web_request("POST", "/save", "name=%2Fetc%2Fx&text=x", true); CHECK(web_response.status == 400);
     web_request("POST", "/save", "name=a%2Fb%2Fc%2Fd&text=x", true); CHECK(web_response.status == 400);
@@ -597,49 +624,183 @@ static void test_web(void) {
 }
 static void test_games(void) { test_tetris(); test_dungeon(); test_new_games(); test_invaders(); test_solitaire(); }
 static void test_telnet(void) {
-    static pim_term_t term;
-    uint8_t reply[32];
-    char view[512];
-    const uint8_t negotiate[] = {255, 251, 1, 255, 253, 24, 255, 253, 3, 255, 251, 3, 255, 250, 24, 1, 255, 240, 'H', 'i'};
-    const uint8_t ansi[] = "\x1b[1;31mRED\x1b[0m\r\nA\x1b[3CB\r\n";
-    size_t used;
-    uint8_t key[2];
-    pim_term_init(&term);
-    used = pim_term_feed(&term, negotiate, sizeof(negotiate), reply, sizeof(reply));
-    CHECK(used == 12);
-    CHECK(reply[0] == 255 && reply[1] == 253 && reply[2] == 1);   /* WILL ECHO -> DO ECHO */
-    CHECK(reply[3] == 255 && reply[4] == 252 && reply[5] == 24);  /* DO TTYPE -> WONT */
-    CHECK(reply[6] == 255 && reply[7] == 251 && reply[8] == 3);   /* DO SGA -> WILL */
-    CHECK(reply[9] == 255 && reply[10] == 253 && reply[11] == 3); /* WILL SGA -> DO */
-    CHECK(term.remote_echo);
-    pim_term_feed(&term, ansi, sizeof(ansi) - 1, reply, sizeof(reply));
-    pim_term_view(&term, 4, 0, view, sizeof(view));
-    CHECK(strstr(view, "HiRED") != NULL && strstr(view, "A   B") != NULL && strstr(view, "[") == NULL);
-    pim_term_init(&term);
-    for (int i = 0; i < 100; i++) {
-        char line[16];
-        snprintf(line, sizeof(line), "L%d\r\n", i);
-        pim_term_feed(&term, (const uint8_t *)line, strlen(line), reply, sizeof(reply));
-    }
-    pim_term_view(&term, 3, 0, view, sizeof(view));
-    CHECK(strcmp(view, "L98\nL99\n") == 0);
-    pim_term_view(&term, 2, 2, view, sizeof(view));
-    CHECK(strcmp(view, "L97\nL98") == 0);
-    CHECK(pim_term_max_scroll(&term, 10) == term.count - 10U);
-    pim_term_init(&term);
+    pim_iac_t iac;
+    uint8_t reply[64], data[64], wire[8];
+    size_t n, used = 0;
+    /* WILL ECHO, DO TTYPE, DO SGA, WILL SGA, SB TTYPE SEND, then two data bytes */
+    const uint8_t negotiate[] = {
+        255, 251, 1, 255, 253, 24, 255, 253, 3, 255, 251, 3,
+        255, 250, 24, 1, 255, 240, 'H', 'i'
+    };
+    const uint8_t expected[] = {
+        255, 253, 1,                                  /* WILL ECHO -> DO ECHO */
+        255, 251, 24,                                 /* DO TTYPE  -> WILL TTYPE */
+        255, 251, 3,                                  /* DO SGA    -> WILL SGA */
+        255, 253, 3,                                  /* WILL SGA  -> DO SGA */
+        255, 250, 24, 0, 'a', 'n', 's', 'i', 255, 240 /* TTYPE SEND -> IS ansi */
+    };
+    pim_iac_init(&iac, PIM_VT_COLS, PIM_VT_ROWS);
+    n = pim_iac_hello(&iac, reply, sizeof(reply));
+    CHECK(n == 12);
+    CHECK(reply[0] == 255 && reply[1] == 253 && reply[2] == 3);   /* DO SGA */
+    CHECK(reply[3] == 255 && reply[4] == 251 && reply[5] == 3);   /* WILL SGA */
+    CHECK(reply[6] == 255 && reply[7] == 251 && reply[8] == 24);  /* WILL TTYPE */
+    CHECK(reply[9] == 255 && reply[10] == 251 && reply[11] == 31);/* WILL NAWS */
+
+    n = pim_iac_feed(&iac, negotiate, sizeof(negotiate), data, sizeof(data), reply, sizeof(reply), &used);
+    CHECK(n == 2 && data[0] == 'H' && data[1] == 'i');
+    CHECK(used == sizeof(expected) && memcmp(reply, expected, sizeof(expected)) == 0);
+    CHECK(iac.remote_echo);
+
+    /* a second type request walks to the next name and then sticks there */
     {
-        uint8_t wide[60];
-        memset(wide, 'x', sizeof(wide));
-        pim_term_feed(&term, wide, sizeof(wide), reply, sizeof(reply));
-        pim_term_view(&term, 5, 0, view, sizeof(view));
-        CHECK(strlen(view) == 61 && view[40] == '\n');
+        const uint8_t again[] = {255, 250, 24, 1, 255, 240};
+        const uint8_t vt100[] = {255, 250, 24, 0, 'v', 't', '1', '0', '0', 255, 240};
+        pim_iac_feed(&iac, again, sizeof(again), data, sizeof(data), reply, sizeof(reply), &used);
+        CHECK(used == sizeof(vt100) && memcmp(reply, vt100, sizeof(vt100)) == 0);
+        pim_iac_feed(&iac, again, sizeof(again), data, sizeof(data), reply, sizeof(reply), &used);
+        CHECK(used == sizeof(vt100) && memcmp(reply, vt100, sizeof(vt100)) == 0);
     }
-    pim_term_feed(&term, (const uint8_t *)"abc\b\bZ\x1b[2J", 11, reply, sizeof(reply));
-    pim_term_view(&term, 5, 0, view, sizeof(view));
-    CHECK(view[0] == '\0');
-    CHECK(pim_term_encode('\r', key) == 2 && key[1] == '\n');
-    CHECK(pim_term_encode(255, key) == 2 && key[1] == 255);
-    CHECK(pim_term_encode('a', key) == 1 && key[0] == 'a');
+
+    /* DO NAWS is answered with WILL and the real window size */
+    {
+        const uint8_t do_naws[] = {255, 253, 31};
+        pim_iac_feed(&iac, do_naws, sizeof(do_naws), data, sizeof(data), reply, sizeof(reply), &used);
+        CHECK(used == 12);
+        CHECK(reply[0] == 255 && reply[1] == 251 && reply[2] == 31);
+        CHECK(reply[3] == 255 && reply[4] == 250 && reply[5] == 31);
+        CHECK(reply[6] == 0 && reply[7] == PIM_VT_COLS && reply[8] == 0 && reply[9] == PIM_VT_ROWS);
+        CHECK(reply[10] == 255 && reply[11] == 240);
+    }
+
+    /* an unknown option is refused, in the matching direction */
+    {
+        const uint8_t odd[] = {255, 251, 99, 255, 253, 98};
+        pim_iac_feed(&iac, odd, sizeof(odd), data, sizeof(data), reply, sizeof(reply), &used);
+        CHECK(used == 6);
+        CHECK(reply[0] == 255 && reply[1] == 254 && reply[2] == 99);  /* WILL -> DONT */
+        CHECK(reply[3] == 255 && reply[4] == 252 && reply[5] == 98);  /* DO   -> WONT */
+    }
+
+    /* WONT ECHO hands the echo back to us */
+    {
+        const uint8_t wont[] = {255, 252, 1};
+        pim_iac_feed(&iac, wont, sizeof(wont), data, sizeof(data), reply, sizeof(reply), &used);
+        CHECK(!iac.remote_echo && used == 3 && reply[1] == 254);
+    }
+
+    /* a doubled 0xff is one data byte, and protocol never reaches the screen */
+    {
+        const uint8_t mixed[] = {'a', 255, 255, 'b', 255, 241, 'c'};
+        n = pim_iac_feed(&iac, mixed, sizeof(mixed), data, sizeof(data), reply, sizeof(reply), &used);
+        CHECK(n == 4 && data[0] == 'a' && data[1] == 255 && data[2] == 'b' && data[3] == 'c');
+        CHECK(used == 0);
+    }
+
+    /* a command split across two reads still works */
+    {
+        const uint8_t first[] = {'x', 255}, second[] = {251, 1, 'y'};
+        n = pim_iac_feed(&iac, first, sizeof(first), data, sizeof(data), reply, sizeof(reply), &used);
+        CHECK(n == 1 && data[0] == 'x' && used == 0);
+        n = pim_iac_feed(&iac, second, sizeof(second), data, sizeof(data), reply, sizeof(reply), &used);
+        CHECK(n == 1 && data[0] == 'y' && used == 3 && iac.remote_echo);
+    }
+
+    /* However the stream is chopped up, the same bytes must reach the screen and
+       the same answers go out: a reply can straddle any read boundary. */
+    {
+        const uint8_t burst[] = {
+            'a', 255, 251, 1, 'b', 255, 253, 31, 255, 250, 24, 1, 255, 240, 'c',
+            255, 255, 'd', 255, 241, 'e'
+        };
+        for (size_t split = 1; split < sizeof(burst); split++) {
+            pim_iac_t piece;
+            uint8_t first[64], second[64], reply_a[96], reply_b[96];
+            size_t used_a = 0, used_b = 0, n1, n2;
+            pim_iac_init(&piece, PIM_VT_COLS, PIM_VT_ROWS);
+            n1 = pim_iac_feed(&piece, burst, split, first, sizeof(first), reply_a, sizeof(reply_a), &used_a);
+            n2 = pim_iac_feed(&piece, burst + split, sizeof(burst) - split, second, sizeof(second),
+                              reply_b, sizeof(reply_b), &used_b);
+            CHECK(n1 + n2 == 6);                       /* a b c 0xff d e */
+            if (n1 + n2 != 6) { printf("  split %zu gave %zu+%zu\n", split, n1, n2); break; }
+            {
+                uint8_t joined[8];
+                memcpy(joined, first, n1);
+                memcpy(joined + n1, second, n2);
+                CHECK(memcmp(joined, "ab", 2) == 0 && joined[2] == 'c' && joined[3] == 255 &&
+                      joined[4] == 'd' && joined[5] == 'e');
+            }
+            CHECK(used_a + used_b == 3 + 3 + 9 + 10);  /* DO ECHO, WILL NAWS, NAWS SB, TTYPE IS */
+            CHECK(piece.remote_echo && piece.naws_agreed);
+        }
+    }
+
+    /* A subnegotiation longer than the buffer must be clipped and ignored, not
+       overrun, and the stream must resynchronise on IAC SE. */
+    {
+        uint8_t flood[PIM_IAC_SUB_MAX + 40];
+        size_t at = 0;
+        flood[at++] = 255; flood[at++] = 250; flood[at++] = 24;
+        while (at < sizeof(flood) - 4) flood[at++] = 'x';
+        flood[at++] = 255; flood[at++] = 240;
+        flood[at++] = 'o'; flood[at++] = 'k';
+        n = pim_iac_feed(&iac, flood, at, data, sizeof(data), reply, sizeof(reply), &used);
+        CHECK(n == 2 && data[0] == 'o' && data[1] == 'k');
+        CHECK(iac.sub_length <= PIM_IAC_SUB_MAX);
+    }
+
+    /* Binary mode: 0xff still doubles on the wire, but a lone CR is left alone. */
+    {
+        const uint8_t binary[] = {255, 253, 0, 255, 251, 0};   /* DO BINARY, WILL BINARY */
+        pim_iac_t raw;
+        pim_iac_init(&raw, PIM_VT_COLS, PIM_VT_ROWS);
+        pim_iac_feed(&raw, binary, sizeof(binary), data, sizeof(data), reply, sizeof(reply), &used);
+        CHECK(raw.binary_out && raw.binary_in);
+        n = pim_iac_encode(&raw, (const uint8_t *)"\r", 1, wire, sizeof(wire));
+        CHECK(n == 1 && wire[0] == '\r');
+    }
+
+    /* The commands with no options - NOP, GA, AYT, Data Mark, Interrupt - are
+       swallowed whole and never reach the screen. */
+    {
+        const uint8_t commands[] = {'A', 255, 241, 255, 249, 255, 246, 255, 242, 255, 244, 'B'};
+        pim_iac_t quiet;
+        pim_iac_init(&quiet, PIM_VT_COLS, PIM_VT_ROWS);
+        n = pim_iac_feed(&quiet, commands, sizeof(commands), data, sizeof(data), reply, sizeof(reply), &used);
+        CHECK(n == 2 && data[0] == 'A' && data[1] == 'B' && used == 0);
+    }
+
+    /* A host that asks for the window size twice is told twice: some send DO
+       NAWS again after a resize or a re-login. */
+    {
+        const uint8_t do_naws[] = {255, 253, 31};
+        pim_iac_t repeat;
+        size_t first_used = 0, second_used = 0;
+        pim_iac_init(&repeat, PIM_VT_COLS, PIM_VT_ROWS);
+        pim_iac_feed(&repeat, do_naws, sizeof(do_naws), data, sizeof(data), reply, sizeof(reply), &first_used);
+        pim_iac_feed(&repeat, do_naws, sizeof(do_naws), data, sizeof(data), reply, sizeof(reply), &second_used);
+        CHECK(first_used == 12);                 /* WILL NAWS plus the size */
+        CHECK(second_used == 9);                 /* already agreed: just the size */
+        CHECK(reply[0] == 255 && reply[1] == 250 && reply[2] == 31);
+        CHECK(reply[4] == PIM_VT_COLS && reply[6] == PIM_VT_ROWS);
+    }
+
+    /* typed bytes get their 0xff doubled and their lone CR completed */
+    n = pim_iac_encode(&iac, (const uint8_t *)"a\xff", 2, wire, sizeof(wire));
+    CHECK(n == 3 && wire[0] == 'a' && wire[1] == 255 && wire[2] == 255);
+    n = pim_iac_encode(&iac, (const uint8_t *)"\r", 1, wire, sizeof(wire));
+    CHECK(n == 2 && wire[0] == '\r' && wire[1] == '\n');
+    n = pim_iac_encode(&iac, (const uint8_t *)"\r\n", 2, wire, sizeof(wire));
+    CHECK(n == 2 && wire[0] == '\r' && wire[1] == '\n');   /* already complete */
+    n = pim_iac_encode(&iac, (const uint8_t *)"abc", 3, wire, 2);
+    CHECK(n == 2);                                        /* cut, never overrun */
+    {
+        pim_iac_t binary;
+        pim_iac_init(&binary, 40, 38);
+        binary.binary_out = true;
+        n = pim_iac_encode(&binary, (const uint8_t *)"\r", 1, wire, sizeof(wire));
+        CHECK(n == 1 && wire[0] == '\r');                 /* binary leaves CR alone */
+    }
 }
 
 static void test_sound(void) {

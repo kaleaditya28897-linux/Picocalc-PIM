@@ -16,6 +16,7 @@
 #include "pim/sound.h"
 #include "pim/storage.h"
 #include "pim/ui.h"
+#include "pim/tailscale.h"
 #include "pim/wifi.h"
 
 #define ROOT "pim_sim_root"
@@ -45,6 +46,7 @@ uint32_t to_ms_since_boot(absolute_time_t time) { return (uint32_t)(time / 1000U
 static bool sim_up, sim_ntp_ok = true, sim_scan_ok = true, sim_telnet_ok = true, sim_telnet_open;
 static uint32_t sim_ntp_seconds = 1773570000U; /* 2026-03-15 10:20:00 UTC */
 static char sim_rx[512], sim_tx[128], sim_telnet_host[64];
+static bool sim_terminal_mode;
 static size_t sim_rx_length, sim_tx_length;
 static unsigned sim_telnet_port;
 static pim_wifi_hooks_t sim_hooks;
@@ -95,8 +97,48 @@ static void server_says(const char *text) {
     memcpy(sim_rx + sim_rx_length, text, length); sim_rx_length += length;
 }
 void pim_wifi_poll(void) {}
-static int sim_wifi_off;
+static int sim_wifi_off, sim_web_stops, sim_web_starts;
 void pim_wifi_off(void) { sim_wifi_off++; }
+void pim_wifi_web_stop(void) { sim_web_stops++; }
+bool pim_wifi_web_start(void) { sim_web_starts++; return true; }
+
+/* A stand-in for the Tailscale client: the real one wants a radio and a
+   tailnet. The screen's only job is to show what the client reports and to
+   start and stop it, so the test sets these directly and checks what appears.
+   These are strong definitions and so replace the weak ones in tsconfig.c. */
+static pim_ts_state_t sim_ts = PIM_TS_OFF;
+static char sim_ts_address[PIM_TS_ADDRESS_MAX + 1];
+static char sim_ts_url[200];
+static char sim_ts_message[PIM_TS_MESSAGE_MAX + 1] = "Off.";
+static int sim_ts_starts, sim_ts_stops;
+static bool sim_ts_can_start = true;
+static pim_ts_config_t sim_ts_started_with;
+
+bool pim_ts_available(void) { return true; }
+bool pim_ts_start(const pim_ts_config_t *config) {
+    sim_ts_started_with = *config;
+    sim_ts_starts++;
+    if (!sim_ts_can_start) {
+        sim_ts = PIM_TS_FAILED;
+        snprintf(sim_ts_message, sizeof(sim_ts_message), "Not enough memory to start Tailscale.");
+        return false;
+    }
+    sim_ts = PIM_TS_STARTING;
+    snprintf(sim_ts_message, sizeof(sim_ts_message), "Starting...");
+    return true;
+}
+void pim_ts_stop(void) {
+    sim_ts_stops++;
+    sim_ts = PIM_TS_OFF;
+    sim_ts_address[0] = '\0';
+    sim_ts_url[0] = '\0';
+    snprintf(sim_ts_message, sizeof(sim_ts_message), "Off.");
+}
+pim_ts_state_t pim_ts_state(void) { return sim_ts; }
+const char *pim_ts_address(void) { return sim_ts_address; }
+const char *pim_ts_message(void) { return sim_ts_message; }
+const char *pim_ts_login_url(void) { return sim_ts_url; }
+void pim_ts_poll(void) { }
 static bool sim_sound = true;
 void pim_sound_set_enabled(bool enabled) { sim_sound = enabled; }
 bool pim_sound_enabled(void) { return sim_sound; }
@@ -188,6 +230,18 @@ static bool goto_focus(const char *text) {
     printf("  (could not focus \"%s\"; focus=\"%s\"; screen:\n%s)\n", text, focus_text(), screen());
     return false;
 }
+static bool goto_focus_contains(const char *needle) {
+    for (int i = 0; i < 90; i++) {
+        if (strstr(focus_text(), needle) != NULL) return true;
+        key(LV_KEY_NEXT);
+    }
+    printf("  (could not focus anything containing \"%s\"; focus=\"%s\")\n", needle, focus_text());
+    return false;
+}
+/* Esc backs out one screen at a time; forms sometimes need more than one. */
+static void go_home(void) {
+    for (int i = 0; i < 6 && !see_line("PicoDeck OS"); i++) key(LV_KEY_ESC);
+}
 static bool activate(const char *text) {
     bool found = goto_focus(text);
     if (found) key(LV_KEY_ENTER);
@@ -263,6 +317,12 @@ static void reset_ui(const char *name) {
     wifi_result = true; wifi_calls = 0; sim_up = false; sim_ntp_ok = true; sim_scan_ok = true; sim_telnet_ok = true;
     sim_telnet_open = false; sim_rx_length = sim_tx_length = 0; sim_ntp_seconds = 1773570000U;
 }
+static bool file_exists(const char *path) {
+    FILE *file = fopen(path, "rb");
+    if (file == NULL) return false;
+    fclose(file);
+    return true;
+}
 static bool file_contains(const char *path, const char *needle) {
     char buffer[8192] = {0};
     FILE *file = fopen(path, "rb");
@@ -283,7 +343,7 @@ static bool database_persisted(void) {
 
 static void test_home(void) {
     static const char *const entries[] = {"Calendar", "To-Do List", "Notes", "Journal", "Files",
-                                          "Text editor", "Tools", "Wi-Fi & web", "Today", "Games", "Theme", "Telnet (BBS)"};
+                                          "Text editor", "Tools", "Wi-Fi & web", "Today", "Games", "Theme", "Terminal"};
     reset_ui("home");
     for (size_t i = 0; i < sizeof(entries) / sizeof(entries[0]); i++) CHECK(see_line(entries[i]));
     CHECK(!see("Appointments"));
@@ -749,6 +809,108 @@ static void test_wifi(void) {
     CHECK(activate("Back")); CHECK(see_line("PicoDeck OS"));
 }
 
+/* The device joining a tailnet on its own: a key off the card, or a login
+   address when there is none, and what the screen shows at each stage. */
+static void test_tailscale(void) {
+    reset_ui("tailscale");
+    sim_ts = PIM_TS_OFF;
+    sim_ts_starts = sim_ts_stops = 0;
+    sim_ts_can_start = true;
+    sim_web_stops = sim_web_starts = 0;
+    sim_ts_address[0] = sim_ts_url[0] = '\0';
+    snprintf(sim_ts_message, sizeof(sim_ts_message), "Off.");
+
+    CHECK(activate("Wi-Fi & web"));
+    CHECK(activate("Tailscale"));
+    theme("tailscale off");
+    CHECK(see("Status: off"));
+    CHECK(see("Address: none yet"));
+    CHECK(see("no key on the card"));       /* nothing written to the card yet */
+
+    /* The tunnel runs over Wi-Fi, so without it there is nothing to do but
+       say so - and not start the client. */
+    CHECK(activate("Connect"));
+    CHECK(see("Join a Wi-Fi network first"));
+    CHECK(sim_ts_starts == 0);
+    key(LV_KEY_ESC);
+
+    /* Connect for real. There is no key on the card, which is not an error:
+       the client is started anyway and asks for an interactive login. */
+    sim_up = true;
+    CHECK(activate("Connect"));
+    CHECK(sim_ts_starts == 1);
+    /* The web server's buffers are handed over for the duration. */
+    CHECK(sim_web_stops == 1);
+    CHECK(strcmp(sim_ts_started_with.name, "picocalc") == 0);
+    CHECK(sim_ts_started_with.authkey[0] == '\0');
+    CHECK(see("Status: starting"));
+
+    /* The control plane wants a login: the address is the whole point of the
+       screen, so it has to be on it, in full. */
+    sim_ts = PIM_TS_REGISTERING;
+    snprintf(sim_ts_message, sizeof(sim_ts_message), "Open the login address below, then wait.");
+    snprintf(sim_ts_url, sizeof(sim_ts_url), "https://login.tailscale.com/a/0123456789abcdef");
+    pump(150);                               /* the screen refreshes each second */
+    CHECK(see("Status: registering"));
+    CHECK(see("Open the login address below"));
+    CHECK(see("https://login.tailscale.com/a/0123456789abcdef"));
+    theme("tailscale login");
+
+    /* On the tailnet: the address it was given is what makes this device
+       reachable, so that is what the screen leads with. */
+    sim_ts = PIM_TS_RUNNING;
+    snprintf(sim_ts_address, sizeof(sim_ts_address), "100.64.1.2");
+    snprintf(sim_ts_message, sizeof(sim_ts_message), "On the tailnet, 9 peers");
+    sim_ts_url[0] = '\0';
+    pump(150);
+    CHECK(see("Status: on the tailnet"));
+    CHECK(see("Address: 100.64.1.2"));
+    CHECK(see("On the tailnet, 9 peers"));
+    CHECK(!see("login.tailscale.com"));      /* no stale login address left over */
+    theme("tailscale running");
+
+    CHECK(activate("Disconnect"));
+    CHECK(sim_ts_stops == 1);
+    CHECK(sim_web_starts == 1);          /* and handed back */
+    CHECK(see("Status: off") && see("Address: none yet"));
+
+    /* A key on the card is used, and never shown in full. */
+    {
+        FILE *file = fopen(ROOT "/tailscale.cfg", "wb");
+        CHECK(file != NULL);
+        if (file != NULL) {
+            fprintf(file, "authkey=tskey-auth-kSimulated1CNTRL-abcdefghijklmnopqrstuvwx\n"
+                          "name=picodeck\nderp=6\n");
+            fclose(file);
+        }
+    }
+    CHECK(activate("Back"));                 /* back to Wi-Fi, then in again */
+    CHECK(activate("Tailscale"));
+    CHECK(see("tskey-auth-kSimu"));
+    CHECK(!see("abcdefghijklmnopqrstuvwx"));
+    CHECK(activate("Connect"));
+    CHECK(sim_ts_starts == 2);
+    CHECK(strcmp(sim_ts_started_with.authkey,
+                 "tskey-auth-kSimulated1CNTRL-abcdefghijklmnopqrstuvwx") == 0);
+    CHECK(strcmp(sim_ts_started_with.name, "picodeck") == 0);
+    CHECK(sim_ts_started_with.derp_region == 6);
+
+    /* A client that cannot start says why instead of looking like it worked. */
+    pim_ts_stop();
+    sim_ts_can_start = false;
+    CHECK(activate("Connect"));
+    CHECK(see("Not enough memory"));
+    key(LV_KEY_ESC);
+    CHECK(see("Status: failed"));
+    theme("tailscale failed");
+
+    sim_ts_can_start = true;
+    pim_ts_stop();
+    sim_up = false;
+    CHECK(activate("Back"));
+    CHECK(see_line("Wi-Fi"));
+}
+
 static void test_wifi_networks(void) {
     reset_ui("wifi networks");
     CHECK(activate("Wi-Fi & web")); CHECK(activate("Join saved")); CHECK(see("No saved networks")); theme("no saved");
@@ -818,43 +980,345 @@ static void test_wifi_time(void) {
     sim_ntp_ok = true;
 }
 
-static void test_telnet(void) {
-    reset_ui("telnet");
-    CHECK(activate("Telnet (BBS)")); theme("telnet setup");
-    CHECK(goto_focus("<textarea>")); type("bbs.example.org"); key(LV_KEY_NEXT);
-    keys(LV_KEY_BACKSPACE, 2); type("2323");
-    CHECK(activate("Connect")); CHECK(see("Not connected")); key(LV_KEY_ESC);
+/* Writes a public key onto the simulated card so the key screen has something
+   to find. It is a real ed25519 key, so the fingerprint shown is a real one. */
+static void make_key_file(void) {
+    FILE *file;
+    mkdir(ROOT "/ssh", 0777);
+    file = fopen(ROOT "/ssh/spare.pub", "wb");
+    if (file == NULL) return;
+    fprintf(file, "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIGb9ECWmEzf8xZ/MGMWyAkWyRcNnZaPtM3SbQ8Nn8PFC spare\n");
+    fclose(file);
+}
+
+/* A throwaway ed25519 key pair on the simulated card, so the SSH connection
+   path can be exercised for real: the key is parsed, the session starts and the
+   first bytes go out on the wire. */
+static void make_ssh_key(void) {
+    FILE *file;
+    mkdir(ROOT "/ssh", 0777);
+    file = fopen(ROOT "/ssh/picocalc", "wb");
+    if (file == NULL) return;
+    fputs(
+        "-----BEGIN OPENSSH PRIVATE KEY-----\n"
+        "b3BlbnNzaC1rZXktdjEAAAAABG5vbmUAAAAEbm9uZQAAAAAAAAABAAAAMwAAAAtzc2gtZW\n"
+        "QyNTUxOQAAACCmyWmqkmVgzarRlrmJebqIA97urW2hFzQEAF6og1rSIAAAAIiVCfQFlQn0\n"
+        "BQAAAAtzc2gtZWQyNTUxOQAAACCmyWmqkmVgzarRlrmJebqIA97urW2hFzQEAF6og1rSIA\n"
+        "AAAEAvuhGXy9ta5Zz8gToaCzOCV+M4xus7PaHZKRnFGqZ4nKbJaaqSZWDNqtGWuYl5uogD\n"
+        "3u6tbaEXNAQAXqiDWtIgAAAABHRlc3QB\n"
+        "-----END OPENSSH PRIVATE KEY-----\n"
+        , file);
+    fclose(file);
+    file = fopen(ROOT "/ssh/picocalc.pub", "wb");
+    if (file != NULL) {
+        fprintf(file, "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIKbJaaqSZWDNqtGWuYl5uogD3u6tbaEXNAQAXqiDWtIg test\n");
+        fclose(file);
+    }
+}
+
+static const char *term_text(void) { return pim_ui_terminal_text(); }
+static bool term_sees(const char *needle) { return strstr(term_text(), needle) != NULL; }
+
+/* Fills in the connection form, which is a row of text areas followed by the
+   two dropdowns, so a Tab walks from one field to the next. */
+static bool form_field(int steps, const char *value) {
+    /* Start from a button so the walk always lands on the first field, whatever
+       was focused before, then step across the fields in creation order. */
+    if (!goto_focus("Connect")) return false;
+    if (!goto_focus("<textarea>")) return false;
+    for (int i = 0; i < steps; i++) key(LV_KEY_NEXT);
+    type(value);
+    return true;
+}
+
+
+/* The startup PIN. What matters is not only that the right PIN opens it, but
+   that nothing else does: Esc, the web hook, and a wrong PIN all have to leave
+   the device shut. */
+static void test_lock(void) {
+    reset_ui("lock");
+
+    /* set one from Tools */
+    CHECK(activate("Tools"));
+    CHECK(activate("Device PIN"));
+    CHECK(see("New six digit PIN"));
+    CHECK(goto_focus("<textarea>"));
+    type("931724");
+    CHECK(activate("Set PIN"));
+    CHECK(see("PIN set"));
+    key(LV_KEY_ESC);
+    /* the screen now offers Change and Remove instead of Set */
+    CHECK(see("Current PIN"));
+    theme("pin settings");
+
+    /* five digits is not a PIN */
+    CHECK(goto_focus("<textarea>"));
+    type("931724");                      /* current */
+    key(LV_KEY_NEXT);
+    type("12345");                       /* new, too short */
+    CHECK(activate("Change"));
+    CHECK(see("Six digits"));
+    key(LV_KEY_ESC);
+
+    /* restarting now asks for it */
+    pim_ui_start(&database, ROOT "/pim.dat");
+    pump(10);
+    CHECK(see("Enter your six digit PIN"));
+    theme("locked");
+
+    /* Esc must not get past it, and neither must the web hook */
+    key(LV_KEY_ESC);
+    pump(5);
+    CHECK(see("Enter your six digit PIN"));
+    sim_hooks.changed();
+    pump(5);
+    CHECK(see("Enter your six digit PIN"));
+    CHECK(!see_line("Calendar"));        /* no sign of Home */
+
+    /* a wrong PIN says so and stays shut */
+    CHECK(goto_focus("<textarea>"));
+    type("000000");
+    pump(10);
+    CHECK(see("Wrong PIN"));
+    CHECK(see("Enter your six digit PIN"));
+
+    /* the right one opens it */
+    type("931724");
+    pump(20);
+    CHECK(!see("Enter your six digit PIN"));
+    CHECK(see_line("PicoDeck OS") || see("Set date and time"));
+    confirm_startup();
+    CHECK(see_line("PicoDeck OS"));
+
+    /* removing it needs the current PIN, and then the lock is gone */
+    CHECK(activate("Tools"));
+    CHECK(activate("Device PIN"));
+    CHECK(goto_focus("<textarea>"));
+    type("000000");
+    CHECK(activate("Remove"));
+    CHECK(see("Wrong PIN"));
+    key(LV_KEY_ESC);
+    CHECK(goto_focus("<textarea>"));
+    keys(LV_KEY_BACKSPACE, 8);
+    type("931724");
+    CHECK(activate("Remove"));
+    CHECK(see("PIN removed"));
+    key(LV_KEY_ESC);
+    pim_ui_start(&database, ROOT "/pim.dat");
+    pump(10);
+    CHECK(!see("Enter your six digit PIN"));
+}
+
+static void test_terminal(void) {
+    reset_ui("terminal");
+    CHECK(activate("Terminal"));
+    CHECK(see("No saved connections"));
+    theme("terminal list");
+
+    /* ---- saving a connection ---- */
+    CHECK(activate("New"));
+    theme("connection form");
+    CHECK(form_field(0, "bbs"));          /* name */
+    CHECK(form_field(2, "bbs.example.org"));  /* past the kind dropdown to the address */
+    CHECK(activate("Save"));
+    CHECK(see_line("bbs"));
+
+    /* ---- connecting ---- */
+    CHECK(activate("bbs"));
+    CHECK(activate("Connect"));
+    CHECK(see("Not connected"));          /* no Wi-Fi yet */
+    key(LV_KEY_ESC);
     sim_up = true;
-    CHECK(goto_focus("<textarea>")); key(LV_KEY_NEXT); keys(LV_KEY_BACKSPACE, 4); type("99999");
-    CHECK(activate("Connect")); CHECK(see("Check the address")); key(LV_KEY_ESC);
-    CHECK(goto_focus("<textarea>")); key(LV_KEY_NEXT); keys(LV_KEY_BACKSPACE, 5); type("2323");
     sim_telnet_ok = false;
-    CHECK(activate("Connect")); CHECK(see("Telnet failed")); theme("telnet failed"); key(LV_KEY_ESC);
-    CHECK(see("bbs.example.org") || see_line("Connect"));
+    CHECK(activate("Connect"));
+    CHECK(see("Connection failed"));
+    key(LV_KEY_ESC);
     sim_telnet_ok = true;
     CHECK(activate("Connect"));
-    CHECK(strcmp(sim_telnet_host, "bbs.example.org") == 0 && sim_telnet_port == 2323);
+    CHECK(strcmp(sim_telnet_host, "bbs.example.org") == 0 && sim_telnet_port == 23);
+    CHECK(sim_terminal_mode);             /* the keyboard hands over every key now */
+
+    /* the opening offer goes out before anything is typed */
+    CHECK(sim_tx_length == 12 && (unsigned char)sim_tx[0] == 255 && (unsigned char)sim_tx[1] == 253);
+
+    /* ---- the screen ---- */
     server_says("Welcome to the BBS\r\n\x1b[1;31mLogin:\x1b[0m "); pump(10);
-    CHECK(see("Welcome to the BBS") && see("Login:") && !see("[1;31m")); theme("telnet terminal");
+    CHECK(term_sees("Welcome to the BBS"));
+    CHECK(term_sees("Login:"));
+    CHECK(!term_sees("[1;31m"));          /* colour is colour, not text */
+    theme("terminal session");
+
+    /* ---- typing ---- */
+    sim_tx_length = 0; sim_tx[0] = '\0';
     type("bob"); key(LV_KEY_ENTER);
-    CHECK(strcmp(sim_tx, "bob\r\n") == 0);
-    CHECK(see("Login: bob")); /* no remote echo, so the terminal echoes locally */
-    for (int i = 0; i < 40; i++) { char line[24]; snprintf(line, sizeof(line), "line %d\r\n", i); server_says(line); pump(5); }
-    CHECK(see("line 39") && !see("Welcome to the BBS"));
-    keys(LV_KEY_UP, 30); CHECK(see("line 9\n") || see("line 10")); CHECK(!see("line 39"));
-    key('x'); CHECK(see("line 39")); /* typing returns to the newest output */
-    server_says("\xff\xfb\x01"); pump(10); /* WILL ECHO: server echoes from now on */
-    sim_tx_length = 0; key('q'); CHECK(strcmp(sim_tx, "q") == 0);
+    CHECK(strcmp(sim_tx, "bob\r\n") == 0);  /* NVT ends a line with CR LF */
+    CHECK(term_sees("Login: bob"));         /* no remote echo, so we echo */
+
+    /* box drawing arrives as UTF-8 and is painted, not printed */
+    server_says("\xe2\x94\x8c\xe2\x94\x80\xe2\x94\x90"); pump(10);
+    theme("terminal line drawing");
+
+    /* once the host says it will echo, we stop doing it ourselves */
+    server_says("\xff\xfb\x01"); pump(10);
+    sim_tx_length = 0; sim_tx[0] = '\0';
+    key('q');
+    CHECK(strcmp(sim_tx, "q") == 0);
+    CHECK(!term_sees("bobq"));
+
+    /* an arrow key becomes an escape sequence, and the application-mode
+       request changes which one */
+    sim_tx_length = 0; sim_tx[0] = '\0';
+    key(LV_KEY_UP);
+    CHECK(strcmp(sim_tx, "\033[A") == 0);
+    server_says("\033[?1h"); pump(5);
+    sim_tx_length = 0; sim_tx[0] = '\0';
+    key(LV_KEY_UP);
+    CHECK(strcmp(sim_tx, "\033OA") == 0);
+
+    /* function keys and Break, which only exist as raw keyboard codes */
+    sim_tx_length = 0; sim_tx[0] = '\0';
+    key(PIM_UI_TERM_KEY | 0x85u);
+    CHECK(strcmp(sim_tx, "\033[15~") == 0);
+    sim_tx_length = 0; sim_tx[0] = '\0';
+    key(PIM_UI_TERM_KEY | 0xd0u);
+    CHECK(strcmp(sim_tx, "\033") == 0);     /* Break sends a real Escape */
+    sim_tx_length = 0; sim_tx[0] = '\0';
+    key(PIM_UI_TERM_KEY | 0x03u);           /* Ctrl-C, folded by the driver */
+    CHECK(sim_tx_length == 1 && sim_tx[0] == 0x03);
+
+    /* ---- scrollback ---- */
+    for (int i = 0; i < 60; i++) { char line[24]; snprintf(line, sizeof(line), "line %d\r\n", i); server_says(line); pump(3); }
+    CHECK(term_sees("line 59") && !term_sees("Welcome to the BBS"));
+    key(PIM_UI_TERM_KEY | 0xd6u);           /* Page Up */
+    key(PIM_UI_TERM_KEY | 0xd6u);
+    CHECK(see("back "));                    /* the status line says how far */
+    theme("terminal scrollback");
+    key(PIM_UI_TERM_KEY | 0xd7u);           /* Page Down */
+    key(PIM_UI_TERM_KEY | 0xd7u);
+    CHECK(!see("back "));
+
+    /* ---- losing the connection ---- */
     sim_telnet_open = false; pump(10);
-    CHECK(see("disconnected")); theme("telnet closed");
-    sim_hooks.changed(); CHECK(see("disconnected")); /* web edits never kick you out of the terminal */
-    key(LV_KEY_ESC); CHECK(see_line("PicoDeck OS")); CHECK(!sim_telnet_open);
-    /* leaving with ESC while still connected closes the socket */
-    CHECK(activate("Telnet (BBS)")); CHECK(activate("Connect")); CHECK(sim_telnet_open);
-    key(LV_KEY_ESC); CHECK(!sim_telnet_open); CHECK(see_line("PicoDeck OS"));
+    CHECK(term_sees("disconnected"));
+    CHECK(!sim_terminal_mode);              /* the keyboard goes back to normal */
+    theme("terminal closed");
+    sim_hooks.changed();
+    CHECK(term_sees("disconnected"));       /* web edits never kick you out */
+    key(LV_KEY_ESC);
+    CHECK(see_line("bbs"));                      /* back to the list */
+
+    /* ---- a connection dials the address it was given ----
+
+       There used to be a relay here: another computer forwarding a port, for a
+       device that could not join a tailnet. This one joins it, so the form no
+       longer offers one and what is saved is what gets dialled. */
+    CHECK(activate("bbs"));
+    CHECK(activate("Connect"));
+    CHECK(strcmp(sim_telnet_host, "bbs.example.org") == 0 && sim_telnet_port == 23);
+    key(LV_KEY_ESC);
+    /* And the form has no relay fields left to fill in. */
+    CHECK(activate("bbs"));
+    CHECK(!see("Relay"));
+    CHECK(see("tunnel"));
+    CHECK(activate("Save"));
+    CHECK(see_line("bbs"));                 /* saving still works with one gone */
+    go_home();
+
+    /* ---- an ssh alias is saved but says so plainly ---- */
+    CHECK(activate("Terminal"));
+    CHECK(activate("New"));
+    CHECK(form_field(0, "nas"));
+    key(LV_KEY_NEXT);
+    key(LV_KEY_ENTER); key(LV_KEY_DOWN); key(LV_KEY_ENTER);   /* kind: ssh */
+    CHECK(form_field(2, "nas.tail1a2b.ts.net"));
+    /* An SSH connection needs a login and a key, and says which is missing
+       rather than dialling and failing somewhere obscure. */
+    CHECK(activate("Connect"));
+    CHECK(see("No user name"));
+    key(LV_KEY_ESC);
+    CHECK(form_field(4, "bob"));                 /* the User field */
+    CHECK(activate("Connect"));
+    CHECK(see("No key chosen"));
+    key(LV_KEY_ESC);
+    CHECK(activate("Save"));                     /* keep it; the key comes next */
+    CHECK(see_line("nas"));
+
+    /* With a key on the card, attached to the connection, Connect starts a real
+       session: the client's identification string goes out on the wire. */
+    make_ssh_key();
+    CHECK(activate("SSH keys"));                 /* the scan is what finds it */
+    CHECK(see("picocalc"));
+    CHECK(activate("Back"));
+    CHECK(goto_focus("nas"));
+    key(LV_KEY_ENTER);
+    CHECK(goto_focus("Connect"));
+    CHECK(goto_focus("<textarea>"));             /* round to the name field */
+    for (int i = 0; i < 5; i++) key(LV_KEY_NEXT);   /* on to the key chooser */
+    CHECK(focus_is("<dropdown>"));
+    key(LV_KEY_ENTER); key(LV_KEY_DOWN); key(LV_KEY_ENTER);
+    sim_tx_length = 0; sim_tx[0] = '\0';
+    CHECK(activate("Connect"));
+    CHECK(strncmp(sim_tx, "SSH-2.0-", 8) == 0);  /* a real SSH session is under way */
+    CHECK(see("greeting") || see("exchanging keys"));
+    theme("ssh session starting");
+    key(LV_KEY_ESC);                             /* leave: no server answers here */
+    CHECK(see_line("nas"));
+
+    /* ---- keys on the card ---- */
+    CHECK(activate("SSH keys"));
+    make_key_file();
+    CHECK(activate("Rescan"));
+    /* The list carries names only; the type and fingerprint are on the detail
+       screen a row opens, which is checked below. */
+    CHECK(see_line("spare"));
+    theme("ssh keys");
+    /* A key made on the device: named, created, and shown with a real
+       fingerprint, with both halves written to the card. */
+    CHECK(activate("Create"));
+    CHECK(goto_focus("<textarea>"));
+    keys(LV_KEY_BACKSPACE, 10);
+    type("onboard");
+    CHECK(activate("Create"));
+    CHECK(see("onboard") && see("ssh-ed25519") && see("256 bits"));
+    CHECK(see("SHA256:"));
+    CHECK(see("on the card"));                   /* the private half is there */
+    CHECK(see("/PIM/ssh/onboard.pub"));          /* and it says how to install it */
+    theme("created key");
+    CHECK(file_exists(ROOT "/ssh/onboard") && file_exists(ROOT "/ssh/onboard.pub"));
+    /* a second key of the same name is refused rather than overwriting it */
+    CHECK(activate("Back"));
+    CHECK(activate("Create"));
+    CHECK(goto_focus("<textarea>"));
+    keys(LV_KEY_BACKSPACE, 10);
+    type("onboard");
+    CHECK(activate("Create"));
+    CHECK(see("Already there"));
+    key(LV_KEY_ESC);
+    CHECK(activate("Back"));
+
+    CHECK(goto_focus_contains("spare"));
+    key(LV_KEY_ENTER);
+    CHECK(see("256 bits") && see("missing"));   /* this one is a public half only */
+    theme("ssh key detail");
+    CHECK(activate("Delete"));
+    /* The key made earlier for the SSH session is still there, so the list is
+       not empty: what matters is that the deleted one has gone. */
+    CHECK(!see("spare") && see("picocalc"));
+    CHECK(activate("Back"));
+    CHECK(see_line("nas"));
+    key(LV_KEY_ESC);
+    CHECK(see_line("PicoDeck OS"));
+
+    /* connections survive a restart, since they live on the card */
+    pim_ui_start(&database, ROOT "/pim.dat");
+    confirm_startup();
+    CHECK(activate("Terminal"));
+    CHECK(see_line("nas") && see_line("bbs"));
+    key(LV_KEY_ESC);
 }
 
 void pim_input_set_game_mode(bool enabled) { (void)enabled; }
+void pim_input_set_terminal_mode(bool enabled) { sim_terminal_mode = enabled; }
 
 bool pim_input_battery(pim_battery_t *battery) {
     if (sim_battery == 0) return false;
@@ -979,13 +1443,20 @@ static void test_theme_switcher(void) {
 
 static void test_navigation_leaks(void) {
     static const char *const entries[] = {"Calendar", "To-Do List", "Notes", "Journal", "Files",
-                                          "Text editor", "Tools", "Wi-Fi & web", "Today", "Games", "Theme", "Telnet (BBS)"};
+                                          "Text editor", "Tools", "Wi-Fi & web", "Today", "Games", "Theme", "Terminal"};
     lv_mem_monitor_t before, after;
     reset_ui("memory");
     for (int round = 0; round < 3; round++)
         for (size_t i = 0; i < sizeof(entries) / sizeof(entries[0]); i++) { activate(entries[i]); key(LV_KEY_ESC); }
     lv_mem_monitor(&before);
-    for (int round = 0; round < 25; round++)
+    /* A hundred rounds, which is twelve hundred screen changes. Twenty-five was
+       not enough to be sure of what it measured: LVGL holds transient
+       allocations of its own - tens of bytes, theme dependent - and sampling
+       while one was outstanding read as a leak. They are gone by the end of a
+       longer run, so this both settles them and gives four times as many
+       chances to leak. What is being tested is accumulation, not an exact
+       byte count. */
+    for (int round = 0; round < 100; round++)
         for (size_t i = 0; i < sizeof(entries) / sizeof(entries[0]); i++) { activate(entries[i]); key(LV_KEY_ESC); }
     lv_mem_monitor(&after);
     printf("  LVGL pool (host 64-bit): free %zu -> %zu of %zu, biggest %zu, frag %u%%\n",
@@ -1027,6 +1498,7 @@ static void test_fuzz(void) {
 }
 
 static int run_suite(const char *theme_name) {
+    const char *only;
     lv_display_t *display;
     lv_indev_t *indev;
     lv_group_t *group;
@@ -1044,29 +1516,35 @@ static int run_suite(const char *theme_name) {
 
     forced_theme = theme_name;
     printf("-- theme %s\n", forced_theme);
-    test_home();
+    /* PIM_UI_ONLY=<name> runs a single scenario, which is how one failure gets
+       looked at without waiting for the other thirty. */
+    only = getenv("PIM_UI_ONLY");
+#define RUN(call, name) do { if (only == NULL || strcmp(only, name) == 0) call; } while (0)
+    RUN(test_home(), "home");
     test_startup(); test_calendar_navigation();
-    test_date_picker();
-    test_time_entry();
-    test_appointment_flow();
-    test_appointment_limits();
-    test_todos();
-    test_today();
-    test_notes();
-    test_journal();
-    test_large_editor();
-    test_tools();
-    test_timer();
-    test_scores();
-    test_files();
-    test_text_editor_entry();
-    test_wifi();
-    test_wifi_networks();
-    test_wifi_time();
-    test_telnet();
-    test_games();
+    RUN(test_date_picker(), "date-picker");
+    RUN(test_time_entry(), "time-entry");
+    RUN(test_appointment_flow(), "appointment");
+    RUN(test_appointment_limits(), "appointment-limits");
+    RUN(test_todos(), "todos");
+    RUN(test_today(), "today");
+    RUN(test_notes(), "notes");
+    RUN(test_journal(), "journal");
+    RUN(test_large_editor(), "large-editor");
+    RUN(test_tools(), "tools");
+    RUN(test_timer(), "timer");
+    RUN(test_scores(), "scores");
+    RUN(test_files(), "files");
+    RUN(test_text_editor_entry(), "text-editor");
+    RUN(test_wifi(), "wifi");
+    RUN(test_wifi_networks(), "wifi networks");
+    RUN(test_tailscale(), "tailscale");
+    RUN(test_wifi_time(), "wifi time");
+    RUN(test_lock(), "lock");
+    RUN(test_terminal(), "terminal");
+    RUN(test_games(), "games");
     if (strcmp(theme_name, "Amber") == 0) test_theme_switcher();
-    test_navigation_leaks();
+    RUN(test_navigation_leaks(), "memory");
     test_fuzz();
     printf("%d checks, %d failures\n", checks, failures);
     return failures == 0 ? 0 : 1;
@@ -1076,6 +1554,9 @@ static int run_suite(const char *theme_name) {
 int main(void) {
     static const char *const theme_names[] = {"Amber", "Green", "Manila"};
     int status_total = 0;
+    /* Each theme runs in a child that leaves through _exit, which does not flush
+       stdio, so buffered output would be lost whenever this is redirected. */
+    setvbuf(stdout, NULL, _IONBF, 0);
     fflush(stdout);
     for (size_t t = 0; t < 3; t++) {
         pid_t child = fork();

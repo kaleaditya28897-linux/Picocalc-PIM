@@ -34,17 +34,53 @@
         "PIM_BUILD_TESTS": "OFF",
         "PICO_BOARD": "pico2_w"
       }
+    },
+    {
+      "name": "pico2w-tailscale",
+      "generator": "Ninja",
+      "binaryDir": "${sourceDir}/build/pico2w-tailscale",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Release",
+        "PIM_BUILD_FIRMWARE": "ON",
+        "PIM_BUILD_TESTS": "OFF",
+        "PICO_BOARD": "pico2_w",
+        "PIM_ENABLE_TAILSCALE": "ON"
+      },
+      "displayName": "Pico 2 W firmware with FreeRTOS and lwIP sockets (Tailscale work in progress)"
     }
   ],
   "buildPresets": [
-    {"name": "host-debug", "configurePreset": "host-debug"},
-    {"name": "host-ui", "configurePreset": "host-ui"},
-    {"name": "pico2w-release", "configurePreset": "pico2w-release"}
+    {
+      "name": "host-debug",
+      "configurePreset": "host-debug"
+    },
+    {
+      "name": "host-ui",
+      "configurePreset": "host-ui"
+    },
+    {
+      "name": "pico2w-release",
+      "configurePreset": "pico2w-release"
+    },
+    {
+      "name": "pico2w-tailscale",
+      "configurePreset": "pico2w-tailscale"
+    }
   ],
   "testPresets": [
-    {"name": "host-debug", "configurePreset": "host-debug",
-     "output": {"outputOnFailure": true}},
-    {"name": "host-ui", "configurePreset": "host-ui",
-     "output": {"outputOnFailure": true}}
+    {
+      "name": "host-debug",
+      "configurePreset": "host-debug",
+      "output": {
+        "outputOnFailure": true
+      }
+    },
+    {
+      "name": "host-ui",
+      "configurePreset": "host-ui",
+      "output": {
+        "outputOnFailure": true
+      }
+    }
   ]
 }

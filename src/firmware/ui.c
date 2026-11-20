@@ -12,11 +12,18 @@
 #include "pim/sound.h"
 #include "pico/time.h"
 #include "pim/games.h"
+#include "pim/lock.h"
+#include "pim/boottrace.h"
+#include "pim/tailscale.h"
 #include "pim/net.h"
 #include "pim/sdgames.h"
 #include "pim/storage.h"
+#include "pim/hosts.h"
+#include "pim/ssh.h"
+#include "pim/sshkey.h"
 #include "pim/telnet.h"
 #include "pim/textfile.h"
+#include "pim/vterm.h"
 #include "pim/tools.h"
 #include "pim/wifi.h"
 
@@ -78,6 +85,7 @@ static const theme_t themes[] = {
 #define TODAY_FILE PIM_ROOT "/today.cfg"
 #define THEME_FILE PIM_ROOT "/theme.cfg"
 #define SOUND_FILE PIM_ROOT "/sound.cfg"
+#define LOCK_FILE PIM_ROOT "/lock.cfg"
 static size_t theme_index;
 #define CRT_AMBER (themes[theme_index].fg)
 #define CRT_BG (themes[theme_index].bg)
@@ -116,8 +124,11 @@ static void delete_entry(lv_event_t *event);
 static void delete_named(lv_event_t *event);
 static void directory_up(lv_event_t *event);
 static void wifi(lv_event_t *event);
-static void telnet(lv_event_t *event);
+static void terminal_screen(lv_event_t *event);
 static void tools_screen(lv_event_t *event);
+static void lock_screen(void);
+static void pin_screen(lv_event_t *event);
+static bool auto_start(void);
 static void journal_write(lv_event_t *event);
 static void recur_reload(void);
 static void note_editor(lv_event_t *event);
@@ -129,25 +140,69 @@ static void save(void) {
         pim_storage_export(PIM_ROOT, ui.database);
     }
 }
+/* Shared styles, applied by reference.
+
+   Setting nineteen local style properties on every object is what used LVGL's
+   heap: each one grows a per-object array, and a list of a hundred rows pays
+   for all of them twenty-five times over - which is where it ran out. These
+   are built once, pointed at by every object, and updated in place when the
+   theme changes. The appearance is identical; what changed is that there is
+   one copy of it rather than one per widget. */
+static lv_style_t style_frame, style_edged, style_flat, style_caret,
+                  style_bar, style_ring, style_picked, style_chosen, style_mark;
+static bool styles_created;
+
+static void styles_refresh(bool notify) {
+    lv_color_t fg, bg;
+    if (!styles_created) {
+        lv_style_init(&style_frame);  lv_style_init(&style_edged);
+        lv_style_init(&style_flat);   lv_style_init(&style_caret);
+        lv_style_init(&style_bar);    lv_style_init(&style_ring);
+        lv_style_init(&style_picked); lv_style_init(&style_chosen);
+        lv_style_init(&style_mark);
+        /* The parts that never vary with the theme. */
+        lv_style_set_radius(&style_frame, 0);
+        lv_style_set_shadow_width(&style_frame, 0);
+        lv_style_set_bg_grad_dir(&style_frame, LV_GRAD_DIR_NONE);
+        lv_style_set_outline_width(&style_frame, 0);
+        lv_style_set_border_width(&style_edged, 1);
+        lv_style_set_border_width(&style_flat, 0);
+        lv_style_set_outline_width(&style_ring, 1);
+        lv_style_set_bg_opa(&style_bar, LV_OPA_COVER);
+        lv_style_set_bg_opa(&style_picked, LV_OPA_COVER);
+        lv_style_set_bg_opa(&style_chosen, LV_OPA_COVER);
+        styles_created = true;
+    }
+    fg = lv_color_hex(CRT_AMBER);
+    bg = lv_color_hex(CRT_BG);
+    lv_style_set_bg_color(&style_frame, bg);
+    lv_style_set_text_color(&style_frame, fg);
+    lv_style_set_border_color(&style_frame, fg);
+    lv_style_set_bg_color(&style_caret, fg);
+    lv_style_set_border_color(&style_caret, fg);
+    lv_style_set_bg_color(&style_bar, fg);
+    lv_style_set_outline_color(&style_ring, fg);
+    lv_style_set_bg_color(&style_picked, fg);
+    lv_style_set_text_color(&style_picked, bg);
+    lv_style_set_bg_color(&style_chosen, fg);
+    lv_style_set_text_color(&style_chosen, bg);
+    lv_style_set_text_color(&style_mark, fg);
+    /* Every object pointing at these picks the new colours up at once. */
+    if (notify) lv_obj_report_style_change(NULL);
+}
+
 static void crt_style(lv_obj_t *object, bool border) {
-    lv_obj_set_style_bg_color(object, lv_color_hex(CRT_BG), 0);
-    lv_obj_set_style_text_color(object, lv_color_hex(CRT_AMBER), 0);
-    lv_obj_set_style_border_color(object, lv_color_hex(CRT_AMBER), 0);
-    lv_obj_set_style_border_width(object, border ? 1 : 0, 0);
-    lv_obj_set_style_radius(object, 0, 0);
-    lv_obj_set_style_shadow_width(object, 0, 0);
-    lv_obj_set_style_outline_width(object, 0, 0);
-    lv_obj_set_style_bg_color(object, lv_color_hex(CRT_AMBER), LV_PART_CURSOR);
-    lv_obj_set_style_border_color(object, lv_color_hex(CRT_AMBER), LV_PART_CURSOR);
-    lv_obj_set_style_border_color(object, lv_color_hex(CRT_AMBER), LV_PART_CURSOR | LV_STATE_FOCUSED);
-    lv_obj_set_style_border_color(object, lv_color_hex(CRT_AMBER), LV_PART_CURSOR | LV_STATE_FOCUS_KEY);
-    lv_obj_set_style_bg_color(object, lv_color_hex(CRT_AMBER), LV_PART_SCROLLBAR);
-    lv_obj_set_style_bg_opa(object, LV_OPA_COVER, LV_PART_SCROLLBAR);
-    lv_obj_set_style_bg_grad_dir(object, LV_GRAD_DIR_NONE, 0);
-    lv_obj_set_style_outline_color(object, lv_color_hex(CRT_AMBER), LV_STATE_FOCUSED);
-    lv_obj_set_style_outline_color(object, lv_color_hex(CRT_AMBER), LV_STATE_FOCUS_KEY);
-    lv_obj_set_style_outline_width(object, border ? 1 : 0, LV_STATE_FOCUSED);
-    lv_obj_set_style_outline_width(object, border ? 1 : 0, LV_STATE_FOCUS_KEY);
+    if (!styles_created) styles_refresh(false);
+    lv_obj_add_style(object, &style_frame, 0);
+    lv_obj_add_style(object, border ? &style_edged : &style_flat, 0);
+    lv_obj_add_style(object, &style_caret, LV_PART_CURSOR);
+    lv_obj_add_style(object, &style_caret, LV_PART_CURSOR | LV_STATE_FOCUSED);
+    lv_obj_add_style(object, &style_caret, LV_PART_CURSOR | LV_STATE_FOCUS_KEY);
+    lv_obj_add_style(object, &style_bar, LV_PART_SCROLLBAR);
+    if (border) {
+        lv_obj_add_style(object, &style_ring, LV_STATE_FOCUSED);
+        lv_obj_add_style(object, &style_ring, LV_STATE_FOCUS_KEY);
+    }
 }
 static void crt_style_children(lv_obj_t *object) {
     if (object == NULL) return;
@@ -156,11 +211,22 @@ static void crt_style_children(lv_obj_t *object) {
     for (uint32_t i = 0; i < count; i++) crt_style_children(lv_obj_get_child(object, (int32_t)i));
 }
 static lv_obj_t *message_return;
+static lv_obj_t *ts_state_obj, *ts_addr_obj, *ts_msg_obj, *ts_url_obj;
+static void term_memory_release(void);
+static lv_obj_t *term_status_obj;
+static bool term_is_ssh;                /* the session is SSH rather than telnet */
 static void clear(void) {
     message_return = NULL;
-    ui.battery_obj = NULL; ui.clock_obj = NULL;
+    ui.battery_obj = NULL; ui.clock_obj = NULL; term_status_obj = NULL;
+    ts_state_obj = NULL; ts_addr_obj = NULL; ts_msg_obj = NULL; ts_url_obj = NULL;
+    /* The session's 26 KB goes back on every screen change, not just when the
+       terminal is left by the front door. The Tailscale client needs a large
+       run of memory each time it re-registers - which it does by itself, after
+       any interruption - and it was failing to find one because this was still
+       held from a session that had finished. term_session() takes it again. */
+    term_memory_release();
     if (ui.timer) { lv_timer_delete(ui.timer); ui.timer = NULL; }
-    ui.game = GAME_NONE; ui.terminal = false;
+    ui.game = GAME_NONE; ui.terminal = false; term_is_ssh = false;
     pim_input_set_game_mode(false);
     lv_obj_clean(lv_screen_active());
     crt_style(lv_screen_active(), false);
@@ -197,15 +263,12 @@ static void style_dropdown_list(lv_event_t *event) {
     lv_obj_t *list = lv_dropdown_get_list(lv_event_get_target(event));
     if (list == NULL) return;
     crt_style(list, true);
-    lv_obj_set_style_bg_color(list, lv_color_hex(CRT_AMBER), LV_PART_SELECTED);
-    lv_obj_set_style_text_color(list, lv_color_hex(CRT_BG), LV_PART_SELECTED);
-    lv_obj_set_style_bg_color(list, lv_color_hex(CRT_AMBER), LV_PART_SELECTED | LV_STATE_CHECKED);
-    lv_obj_set_style_text_color(list, lv_color_hex(CRT_BG), LV_PART_SELECTED | LV_STATE_CHECKED);
-    lv_obj_set_style_bg_opa(list, LV_OPA_COVER, LV_PART_SELECTED | LV_STATE_CHECKED);
+    lv_obj_add_style(list, &style_chosen, LV_PART_SELECTED);
+    lv_obj_add_style(list, &style_chosen, LV_PART_SELECTED | LV_STATE_CHECKED);
 }
 static void crt_dropdown(lv_obj_t *object) {
     crt_style(object, true);
-    lv_obj_set_style_text_color(object, lv_color_hex(CRT_AMBER), LV_PART_INDICATOR);
+    lv_obj_add_style(object, &style_mark, LV_PART_INDICATOR);
     lv_obj_add_event_cb(object, style_dropdown_list, LV_EVENT_CLICKED, NULL);
     lv_obj_add_event_cb(object, style_dropdown_list, LV_EVENT_KEY, NULL);
     lv_obj_add_event_cb(object, style_dropdown_list, LV_EVENT_READY, NULL);
@@ -213,7 +276,7 @@ static void crt_dropdown(lv_obj_t *object) {
 static bool safe_file_name(const char *name) {
     size_t length = strlen(name);
     if (length == 0 || length >= FILE_NAME_MAX || strcmp(name, ".") == 0 ||
-        strcmp(name, "..") == 0 || strcmp(name, "pim.dat") == 0 || strcmp(name, "wifi.cfg") == 0 || strcmp(name, "theme.cfg") == 0 || strcmp(name, "today.cfg") == 0 || strcmp(name, "sound.cfg") == 0 || strcmp(name, "recurring.cfg") == 0) return false;
+        strcmp(name, "..") == 0 || strcmp(name, "pim.dat") == 0 || strcmp(name, "wifi.cfg") == 0 || strcmp(name, "hosts.cfg") == 0 || strcmp(name, "lock.cfg") == 0 || strcmp(name, "theme.cfg") == 0 || strcmp(name, "today.cfg") == 0 || strcmp(name, "sound.cfg") == 0 || strcmp(name, "recurring.cfg") == 0) return false;
     for (size_t i = 0; i < length; i++)
         if (!((name[i] >= 'a' && name[i] <= 'z') || (name[i] >= 'A' && name[i] <= 'Z') ||
               (name[i] >= '0' && name[i] <= '9') || name[i] == '.' || name[i] == '_' || name[i] == '-')) return false;
@@ -230,14 +293,23 @@ static bool join_path(char *path, size_t path_size, const char *directory, const
 }
 static void style_list_item(lv_obj_t *item) {
     crt_style(item, true);
-    lv_obj_set_style_bg_opa(item, LV_OPA_COVER, LV_STATE_FOCUSED);
-    lv_obj_set_style_bg_opa(item, LV_OPA_COVER, LV_STATE_FOCUS_KEY);
-    lv_obj_set_style_bg_color(item, lv_color_hex(CRT_AMBER), LV_STATE_FOCUSED);
-    lv_obj_set_style_bg_color(item, lv_color_hex(CRT_AMBER), LV_STATE_FOCUS_KEY);
-    lv_obj_set_style_text_color(item, lv_color_hex(CRT_BG), LV_STATE_FOCUSED);
-    lv_obj_set_style_text_color(item, lv_color_hex(CRT_BG), LV_STATE_FOCUS_KEY);
+    lv_obj_add_style(item, &style_picked, LV_STATE_FOCUSED);
+    lv_obj_add_style(item, &style_picked, LV_STATE_FOCUS_KEY);
     lv_obj_add_event_cb(item, navigate, LV_EVENT_KEY, NULL);
 }
+/* lv_list_add_button gives its label LV_LABEL_LONG_MODE_SCROLL_CIRCULAR, so a
+   row wider than the list scrolls round and round by itself - with a screenful
+   of rows the whole list appears to writhe. Rows here are short enough to fit,
+   and this makes sure that even if one is not, it is clipped and still. */
+static void list_row_still(lv_obj_t *item) {
+    for (uint32_t i = 0; i < lv_obj_get_child_count(item); i++) {
+        lv_obj_t *child = lv_obj_get_child(item, (int32_t)i);
+        if (lv_obj_check_type(child, &lv_label_class)) {
+            lv_label_set_long_mode(child, LV_LABEL_LONG_MODE_CLIP);
+        }
+    }
+}
+
 static size_t index_from_event(lv_event_t *event) {
     return (size_t)((uintptr_t)lv_event_get_user_data(event) - 1U);
 }
@@ -313,8 +385,19 @@ static void sound_toggle(lv_event_t *event) {
     lv_label_set_text(lv_obj_get_child(sound_button, 0), pim_sound_enabled() ? "Sound: ON" : "Sound: OFF");
     pim_sound_play(PIM_SOUND_SELECT);
 }
+/* True from boot until the PIN is accepted. home() is where every screen comes
+   back to, including the web server's "something changed" hook, so holding the
+   lock here closes all of those paths at once - including Esc, which the button
+   key handler turns into home(). */
+static bool device_locked;
+
+/* Shown once per start, if the one before it did not finish. */
+static bool boot_report_shown;
+
 static void home(lv_event_t *event) {
-    lv_obj_t *first; (void)event; clear();
+    lv_obj_t *first; (void)event;
+    if (device_locked) { lock_screen(); return; }
+    clear();
     label("PicoDeck OS", 105, 2);
     first = button("Calendar", 10, 22, 145, home_calendar, NULL);
     button("To-Do List", 165, 22, 145, todos, NULL);
@@ -327,7 +410,7 @@ static void home(lv_event_t *event) {
     button("Today", 10, 142, 145, today_screen, NULL);
     button("Games", 165, 142, 145, games_screen, NULL);
     button("Theme", 10, 172, 145, theme_screen, NULL);
-    button("Telnet (BBS)", 165, 172, 145, telnet, NULL);
+    button("Terminal", 165, 172, 145, terminal_screen, NULL);
     sound_button = button(pim_sound_enabled() ? "Sound: ON" : "Sound: OFF", 10, 202, 145, sound_toggle, NULL);
     {
         lv_obj_t *rule = lv_obj_create(lv_screen_active());
@@ -349,6 +432,14 @@ static void home(lv_event_t *event) {
     battery_refresh(NULL);
     ui.timer = lv_timer_create(battery_refresh, 15000, NULL);
     focus(first);
+    if (!boot_report_shown) {
+        /* A start that did not finish is worth one plain sentence, once: the
+           device cannot be asked what happened after the fact. */
+        char report[96];
+        boot_report_shown = true;
+        pim_boot_failure_text(report, sizeof(report));
+        if (report[0] != '\0') message("Last start", report);
+    }
 }
 
 static void format_date(char *out, size_t size, pim_date_t date) {
@@ -1027,7 +1118,8 @@ static void tools_screen(lv_event_t *event) {
     button("Timer", 10, 68, 145, timer_screen, NULL);
     button("Recurring", 165, 68, 145, recur_screen, NULL);
     button("Backup", 10, 102, 145, backup_screen, NULL);
-    button("Back", 165, 102, 145, home, NULL);
+    button("Device PIN", 165, 102, 145, pin_screen, NULL);
+    button("Back", 10, 136, 145, home, NULL);
     focus(first);
 }
 
@@ -1421,11 +1513,58 @@ static pim_wifi_config_t wifi_cfg;
 static bool wifi_cfg_ready;
 static pim_wifi_ap_t wifi_aps[SCAN_MAX];
 static char wifi_pending[PIM_WIFI_SSID_MAX + 1];
-static char telnet_host[64] = "";
-static char telnet_port[8] = "23";
+#define HOSTS_FILE PIM_ROOT "/hosts.cfg"
+#define SSH_DIR PIM_ROOT "/ssh"
+#define TS_FILE PIM_ROOT "/tailscale.cfg"
+/* Everything a terminal session needs, in one block, held only while a session
+   is open. The emulator alone is three screens of cells and the SSH session
+   several kilobytes more - together about 26 KB that would otherwise sit in
+   RAM all day. The Tailscale client needs a large run of memory to parse a
+   network map and cannot get one while this is reserved, and you cannot be in
+   a terminal session at the moment the tunnel comes up.
+
+   The names below are kept as they were so that the forty places that use them
+   read the same; what changed is where the memory is. */
+typedef struct {
+    pim_vt_t vt;
+    pim_ssh_t ssh;
+    uint8_t wire[PIM_SSH_PACKET_MAX];
+    uint8_t text[PIM_SSH_PACKET_MAX];
+} term_memory_t;
+
+static term_memory_t *term_memory;
+
+#define vt (term_memory->vt)
+#define ssh_wire (term_memory->wire)
+#define ssh_text (term_memory->text)
+
+static bool term_memory_ensure(void) {
+    if (term_memory == NULL) term_memory = calloc(1, sizeof(*term_memory));
+    return term_memory != NULL;
+}
+
+/* Released when a session is finished with, and when the Tailscale client
+   starts, which is the moment the memory is most wanted elsewhere. */
+static void term_memory_release(void) {
+    free(term_memory);
+    term_memory = NULL;
+}
+
+static pim_iac_t iac;
+static pim_host_t ssh_host;             /* kept for the host-key prompt and known_hosts */
+static pim_ssh_config_t ssh_config;
+static bool ssh_prompt_pending;         /* waiting for the user to accept a host key */
+static bool ssh_reported;               /* the failure has already been put on screen */
+#define KNOWN_HOSTS_FILE PIM_ROOT "/known_hosts"
+static pim_hosts_t host_list;
+static pim_ssh_keys_t key_list;
+static bool hosts_ready;
+static size_t host_index = PIM_HOST_MAX, key_index;
+static lv_obj_t *host_field[6], *host_kind_obj, *host_key_obj;
+static char term_title[PIM_HOST_ALIAS_MAX + 1];
 static unsigned term_scroll;
-static bool term_dirty, term_notified;
-static pim_term_t term;
+static bool term_notified;
+static uint8_t term_cursor_row, term_cursor_col;
 
 static void wifi_cfg_load(void) {
     if (wifi_cfg_ready) return;
@@ -1642,6 +1781,123 @@ static void wifi_zone(lv_event_t *event) {
     label("Used by NTP time sync", 76, 220);
     focus(first);
 }
+/* ---- Tailscale ----
+
+   The device joins the tailnet by itself. What it needs is on the card, in
+   /PIM/tailscale.cfg: an auth key, or nothing at all, in which case the
+   control plane hands back a login address to open on another machine. The
+   client keeps this device's own keys in /PIM/ts, which the web server will
+   neither list nor serve.
+
+   The screen is driven by a one-second timer because registering takes a while
+   and goes through several stages worth watching. */
+
+static pim_ts_config_t ts_cfg;
+
+static const char *ts_state_text(void) {
+    switch (pim_ts_state()) {
+        case PIM_TS_OFF: return "off";
+        case PIM_TS_STARTING: return "starting";
+        case PIM_TS_REGISTERING: return "registering";
+        case PIM_TS_RUNNING: return "on the tailnet";
+        default: return "failed";
+    }
+}
+
+static void ts_refresh(void) {
+    const char *address = pim_ts_address();
+    const char *url = pim_ts_login_url();
+    char line[80];
+    if (ts_state_obj == NULL) return;
+    snprintf(line, sizeof(line), "Status: %s", ts_state_text());
+    lv_label_set_text(ts_state_obj, line);
+    snprintf(line, sizeof(line), "Address: %s", address[0] != '\0' ? address : "none yet");
+    lv_label_set_text(ts_addr_obj, line);
+    lv_label_set_text(ts_msg_obj, pim_ts_message());
+    lv_label_set_text(ts_url_obj, url);
+}
+
+static void ts_tick(lv_timer_t *timer) {
+    (void)timer;
+    pim_ts_poll();
+    ts_refresh();
+}
+
+static void ts_screen(lv_event_t *event);
+
+static void ts_connect(lv_event_t *event) {
+    (void)event;
+    if (!pim_ts_available()) { message("Tailscale", pim_ts_message()); return; }
+    if (!pim_wifi_connected()) {
+        message("Tailscale", "Join a Wi-Fi network first: the tunnel runs over it.");
+        return;
+    }
+    /* No usable file is not a reason to refuse. Without a key the control
+       plane answers with a login address, which is the easier way to add a
+       device to a tailnet anyway. */
+    if (!pim_ts_config_load(TS_FILE, &ts_cfg)) pim_ts_config_init(&ts_cfg);
+    /* The two biggest users of memory on the device cannot both have it: the
+       web server's buffers are 29 KB and the client needs a large run free to
+       parse a network map. The web PIM comes back on disconnect. */
+    pim_wifi_web_stop();
+    /* A terminal session's buffers are 26 KB and there is no session open
+       while this screen is in front of you. */
+    term_memory_release();
+    if (!pim_ts_start(&ts_cfg)) message("Tailscale", pim_ts_message());
+    ts_refresh();
+}
+
+static void ts_disconnect(lv_event_t *event) {
+    (void)event;
+    pim_ts_stop();
+    pim_wifi_web_start();       /* the web PIM can have its buffers back */
+    ts_refresh();
+}
+
+static void ts_screen(lv_event_t *event) {
+    char summary[64];
+    lv_obj_t *first;
+    (void)event;
+    clear();
+    label("Tailscale", 120, 4);
+
+    ts_state_obj = label("Status:", 10, 28);
+    ts_addr_obj = label("Address:", 10, 46);
+
+    ts_msg_obj = label("", 10, 70);
+    lv_obj_set_width(ts_msg_obj, 300);
+    lv_label_set_long_mode(ts_msg_obj, LV_LABEL_LONG_MODE_WRAP);
+
+    /* The login address, when there is one, is the whole point of the screen,
+       so it gets room to wrap rather than being cut off. */
+    ts_url_obj = label("", 10, 112);
+    lv_obj_set_width(ts_url_obj, 300);
+    lv_label_set_long_mode(ts_url_obj, LV_LABEL_LONG_MODE_WRAP);
+
+    first = button("Connect", 10, 168, 145, ts_connect, NULL);
+    button("Disconnect", 165, 168, 145, ts_disconnect, NULL);
+    button("Back", 10, 200, 145, wifi, NULL);
+
+    if (!pim_ts_config_load(TS_FILE, &ts_cfg)) pim_ts_config_init(&ts_cfg);
+    pim_ts_authkey_summary(ts_cfg.authkey, summary, sizeof(summary));
+    label(summary, 10, 240);
+    if (pim_ts_free_memory() != 0) {
+        /* The client wants a large run of memory to parse a network map, so
+           this is the first thing to look at when it will not start. */
+        snprintf(summary, sizeof(summary), "Free memory: %u KB",
+                 (unsigned)(pim_ts_free_memory() / 1024));
+        label(summary, 170, 240);
+    }
+    label("With no key it shows a login", 10, 262);
+    label("address to open elsewhere. The", 10, 280);
+    label("web PIM pauses while it runs.", 10, 298);
+
+    pim_ts_poll();
+    ts_refresh();
+    ui.timer = lv_timer_create(ts_tick, 1000, NULL);
+    focus(first);
+}
+
 static void wifi_off(lv_event_t *event) {
     (void)event;
     pim_wifi_off();
@@ -1665,131 +1921,440 @@ static void wifi(lv_event_t *event) {
     button("Forget saved", 165, 116, 145, wifi_saved, (void *)(intptr_t)1);
     button("Web address", 10, 148, 145, wifi_info, NULL);
     button("Wi-Fi off", 165, 148, 145, wifi_off, NULL);
-    button("Back", 10, 180, 145, home, NULL);
-    label("Once connected, open the web", 36, 220);
-    label("address from a phone or PC.", 44, 238);
-    label("PIN shown there. HTTP only,", 40, 262);
-    label("so use a trusted network.", 52, 280);
+    /* Only where there is a client to talk to: a firmware built without it
+       would offer a button that can only apologise. */
+    if (pim_ts_available()) button("Tailscale", 165, 180, 145, ts_screen, NULL);
+    button("Back", 10, 212, 145, home, NULL);
+    label("Once connected, open the web", 36, 248);
+    label("address from a phone or PC.", 44, 266);
+    label("PIN shown there. HTTP only,", 40, 284);
     focus(first);
 }
 
-/* ---- Telnet client for BBSs ---- */
+/* ---- Terminal: saved connections, SSH keys and the VT session ---- */
 
-#define TERM_ROWS 24
-static void term_refresh(void) {
-    char view[(PIM_TERM_COLS + 1) * TERM_ROWS + 1];
-    pim_term_view(&term, TERM_ROWS, term_scroll, view, sizeof(view));
-    lv_label_set_text(ui.preview, view);
-    term_dirty = false;
+static void term_session(void);
+static void host_form(lv_event_t *event);
+static void term_keys_screen(lv_event_t *event);
+static void key_new_screen(lv_event_t *event);
+
+static void hosts_reload(void) {
+    if (hosts_ready) return;
+    pim_hosts_load(HOSTS_FILE, &host_list);
+    hosts_ready = true;
 }
-static void telnet_leave(lv_event_t *event) {
+static void keys_reload(void) {
+    mkdir(SSH_DIR, 0777);
+    pim_ssh_keys_scan(SSH_DIR, &key_list);
+}
+
+/* ---- the connection list ---- */
+
+static void host_open(lv_event_t *event) {
+    host_index = index_from_event(event);
+    host_form(NULL);
+}
+static void host_new(lv_event_t *event) {
     (void)event;
-    pim_telnet_close();
-    home(NULL);
+    host_index = PIM_HOST_MAX;
+    host_form(NULL);
 }
-static void telnet_send(const uint8_t *bytes, size_t length) {
-    if (pim_telnet_is_open()) pim_telnet_write(bytes, length);
-}
-static void telnet_key(lv_event_t *event) {
-    uint32_t key = lv_event_get_key(event);
-    uint8_t out[2];
-    if (key == LV_KEY_ESC) { telnet_leave(NULL); return; }
-    if (!pim_telnet_is_open()) return;
-    if (key == LV_KEY_UP) { if (term_scroll < pim_term_max_scroll(&term, TERM_ROWS)) term_scroll++; term_dirty = true; return; }
-    if (key == LV_KEY_DOWN) { if (term_scroll > 0) term_scroll--; term_dirty = true; return; }
-    if (key == LV_KEY_BACKSPACE) key = 0x08;
-    else if (key == LV_KEY_ENTER) key = '\r';
-    else if (key >= 128 || key < 32) return;
-    term_scroll = 0;
-    telnet_send(out, pim_term_encode((uint8_t)key, out));
-    if (!term.remote_echo && key >= 32) {
-        uint8_t echo = (uint8_t)key, none[4];
-        pim_term_feed(&term, &echo, 1, none, sizeof(none));
-    } else if (!term.remote_echo && key == '\r') {
-        pim_term_feed(&term, (const uint8_t *)"\r\n", 2, out, sizeof(out));
-    }
-    term_dirty = true;
-}
-static void telnet_tick(lv_timer_t *timer) {
-    uint8_t data[256], reply[64];
-    size_t count;
-    (void)timer;
-    while ((count = pim_telnet_read(data, sizeof(data))) > 0) {
-        size_t used = pim_term_feed(&term, data, count, reply, sizeof(reply));
-        if (used > 0) telnet_send(reply, used);
-        term_dirty = true;
-    }
-    if (!pim_telnet_is_open() && !term_notified) {
-        const uint8_t note[] = "\r\n[disconnected - ESC to leave]\r\n";
-        pim_term_feed(&term, note, sizeof(note) - 1, reply, sizeof(reply));
-        term_notified = true;
-        term_dirty = true;
-    }
-    if (term_dirty) term_refresh();
-}
-static void telnet_screen(void) {
+
+static void terminal_screen(lv_event_t *event) {
+    lv_obj_t *list, *first;
+    (void)event;
     clear();
-    pim_term_init(&term);
-    term_scroll = 0;
-    term_notified = false;
-    ui.terminal = true;
-    ui.board = lv_obj_create(lv_screen_active());
-    lv_obj_set_size(ui.board, 320, 320); lv_obj_set_pos(ui.board, 0, 0);
-    lv_obj_remove_flag(ui.board, LV_OBJ_FLAG_SCROLLABLE);
-    crt_style(ui.board, false);
-    lv_obj_set_style_pad_all(ui.board, 0, 0);
-    lv_obj_set_style_outline_width(ui.board, 0, LV_STATE_ANY);
-    ui.preview = lv_label_create(ui.board);
-    lv_obj_set_pos(ui.preview, 0, 2); lv_obj_set_width(ui.preview, 320);
-    lv_label_set_long_mode(ui.preview, LV_LABEL_LONG_CLIP);
-    lv_obj_set_style_text_font(ui.preview, &lv_font_unscii_8, 0);
-    lv_obj_set_style_text_line_space(ui.preview, 3, 0);
-    crt_style(ui.preview, false);
-    lv_obj_set_style_text_font(ui.preview, &lv_font_unscii_8, 0);
-    lv_obj_set_style_text_line_space(ui.preview, 3, 0);
-    label("ESC leave   UP/DN scroll", 60, 300);
-    lv_obj_add_event_cb(ui.board, telnet_key, LV_EVENT_KEY, NULL);
-    if (lv_obj_get_group(ui.board) == NULL) lv_group_add_obj(lv_group_get_default(), ui.board);
-    focus(ui.board);
-    ui.timer = lv_timer_create(telnet_tick, 40, NULL);
-    term_refresh();
+    hosts_reload();
+    label("Terminal", 118, 6);
+    first = button("New", 12, 282, 92, host_new, NULL);
+    button("SSH keys", 114, 282, 92, term_keys_screen, NULL);
+    button("Back", 216, 282, 92, home, NULL);
+    list = lv_list_create(lv_screen_active());
+    lv_obj_set_pos(list, 8, 30); lv_obj_set_size(list, 304, 244); crt_style(list, true);
+    if (host_list.count == 0) {
+        /* A plain label, not a list text: the list's own text widget is a label
+           subclass, which the headless tests cannot read. */
+        lv_obj_t *item = lv_label_create(list);
+        lv_label_set_text(item, "No saved connections.\nNew adds one.");
+        crt_style(item, false);
+    }
+    for (size_t i = 0; i < host_list.count; i++) {
+        /* Just the name. Everything else about the connection is on the form a
+           row opens, and a long row label is what made this list roll. */
+        lv_obj_t *item = lv_list_add_button(list, NULL, host_list.hosts[i].alias);
+        lv_obj_add_event_cb(item, host_open, LV_EVENT_CLICKED, (void *)(uintptr_t)(i + 1));
+        style_list_item(item);
+        list_row_still(item);
+    }
+    focus(first);
 }
-static void telnet_connect(lv_event_t *event) {
-    unsigned long port;
+
+/* ---- adding and editing one connection ---- */
+
+static unsigned long field_number(lv_obj_t *field, bool *ok) {
+    const char *value = lv_textarea_get_text(field);
     char *end;
+    unsigned long number;
+    if (value[0] == '\0') { *ok = true; return 0; }
+    number = strtoul(value, &end, 10);
+    *ok = (*end == '\0' && number <= 65535UL);
+    return number;
+}
+
+static void host_read_form(pim_host_t *host, bool *ok) {
+    bool port_ok = false;
+    unsigned long port;
+    pim_host_init(host, lv_dropdown_get_selected(host_kind_obj) == 1 ? PIM_HOST_SSH : PIM_HOST_TELNET);
+    snprintf(host->alias, sizeof(host->alias), "%s", lv_textarea_get_text(host_field[0]));
+    snprintf(host->address, sizeof(host->address), "%s", lv_textarea_get_text(host_field[1]));
+    snprintf(host->user, sizeof(host->user), "%s", lv_textarea_get_text(host_field[3]));
+    /* The form no longer offers a relay, so whatever one an existing entry
+       carries is carried forward rather than erased by saving. */
+    if (host_index < host_list.count) {
+        snprintf(host->relay, sizeof(host->relay), "%s", host_list.hosts[host_index].relay);
+        host->relay_port = host_list.hosts[host_index].relay_port;
+    }
+    port = field_number(host_field[2], &port_ok);
+    if (port != 0) host->port = (uint16_t)port;
+    if (lv_dropdown_get_selected(host_key_obj) > 0) {
+        unsigned choice = lv_dropdown_get_selected(host_key_obj) - 1u;
+        if (choice < key_list.count) snprintf(host->key, sizeof(host->key), "%s", key_list.keys[choice].name);
+    }
+    *ok = port_ok;
+}
+
+static void host_save(lv_event_t *event) {
+    pim_host_t host;
+    bool numbers_ok = false;
     (void)event;
-    snprintf(telnet_host, sizeof(telnet_host), "%s", lv_textarea_get_text(ui.title));
-    snprintf(telnet_port, sizeof(telnet_port), "%s", lv_textarea_get_text(ui.content));
-    port = strtoul(telnet_port, &end, 10);
-    if (telnet_host[0] == '\0' || telnet_port[0] == '\0' || *end != '\0' || port == 0 || port > 65535) {
-        message("Check the address", "Enter a host name and a port from 1 to 65535.");
+    hosts_reload();
+    host_read_form(&host, &numbers_ok);
+    if (!numbers_ok) { message("Check the ports", "A port is a number from 1 to 65535."); return; }
+    if (host.alias[0] == '\0' || host.address[0] == '\0') {
+        message("Check the details", "A connection needs a short name and an address.");
+        return;
+    }
+    if (host.relay[0] != '\0' && host.relay_port == 0) {
+        message("Check the relay", "A relay needs a port as well as an address.");
+        return;
+    }
+    if (!pim_host_valid(&host)) {
+        message("Check the details", "Use plain text only: no tabs and no accents.");
+        return;
+    }
+    /* Editing drops the old record first, so a rename does not leave both. */
+    if (host_index < host_list.count) pim_hosts_remove(&host_list, host_index);
+    if (!pim_hosts_put(&host_list, &host)) {
+        message("No room", "The connection list is full. Delete one first.");
+        return;
+    }
+    if (!pim_hosts_save(HOSTS_FILE, &host_list)) message("Not saved", "The SD card did not accept the change.");
+    pim_sound_play(PIM_SOUND_SELECT);
+    terminal_screen(NULL);
+}
+
+static void host_delete(lv_event_t *event) {
+    (void)event;
+    hosts_reload();
+    if (host_index < host_list.count) {
+        pim_hosts_remove(&host_list, host_index);
+        pim_hosts_save(HOSTS_FILE, &host_list);
+    }
+    terminal_screen(NULL);
+}
+
+/* Loads what an SSH connection needs before the socket is opened: the key off
+   the card, and whatever this host's key fingerprinted as last time. Says what
+   is wrong and returns false rather than dialling and failing obscurely. */
+static bool ssh_prepare(const pim_host_t *host) {
+    /* Nothing is in flight before the socket opens, so the session's inbound
+       buffer is the obvious place to read the key file into. */
+    char *text = (char *)ssh_text;
+    const size_t text_size = sizeof(ssh_text);
+    char path[160];
+    const char *why = NULL;
+    FILE *file;
+    size_t read;
+
+    memset(&ssh_config, 0, sizeof(ssh_config));
+    ssh_config.cols = PIM_VT_COLS;
+    ssh_config.rows = PIM_VT_ROWS;
+    if (host->user[0] == '\0') {
+        message("No user name", "An SSH connection needs a login. Put one in the User field.");
+        return false;
+    }
+    snprintf(ssh_config.user, sizeof(ssh_config.user), "%s", host->user);
+    if (host->key[0] == '\0') {
+        message("No key chosen", "Pick an SSH key for this connection, or add one under SSH keys.");
+        return false;
+    }
+    snprintf(path, sizeof(path), "%s/%s", SSH_DIR, host->key);
+    file = fopen(path, "rb");
+    if (file == NULL) {
+        message("Key not found", "The private half of that key is not on the card.");
+        return false;
+    }
+    read = fread(text, 1, text_size - 1, file);
+    fclose(file);
+    text[read] = '\0';
+    if (!pim_ssh_parse_private_key(text, ssh_config.secret, &why)) {
+        message("Key unusable", why != NULL ? why : "That key could not be read.");
+        return false;
+    }
+    ssh_config.have_secret = true;
+    /* Pinned by alias, not by address. With a relay in the way, or two
+       different servers both reached at 127.0.0.1 through a jump host, the
+       address is not unique and two hosts would end up sharing one pin - which
+       would read as a key change on whichever was dialled second. The alias is
+       the only name the device can rely on being one host. */
+    pim_ssh_known_host_find(KNOWN_HOSTS_FILE, host->alias,
+                            ssh_config.known_fingerprint, sizeof(ssh_config.known_fingerprint));
+    return true;
+}
+
+static void host_connect(lv_event_t *event) {
+    pim_host_t host;
+    const char *address = NULL;
+    uint16_t port = 0;
+    bool numbers_ok = false;
+    (void)event;
+    /* Before anything reads a key or dials: the session's buffers are what
+       the key is read into. */
+    if (!term_memory_ensure()) {
+        message("Terminal", "Not enough memory for a session.");
+        return;
+    }
+    host_read_form(&host, &numbers_ok);
+    if (!numbers_ok || host.address[0] == '\0') {
+        message("Check the details", "A connection needs an address and a port from 1 to 65535.");
         return;
     }
     if (!pim_wifi_connected()) { message("Not connected", "Join a network from the Wi-Fi screen first."); return; }
-    busy("Connecting...", telnet_host);
-    if (!pim_telnet_open(telnet_host, (uint16_t)port)) {
-        telnet(NULL);
-        message("Telnet failed", "Could not reach that host. Check the name and port.");
+    if (host.kind == PIM_HOST_SSH && !ssh_prepare(&host)) return;   /* it said why */
+    /* A relay is how to reach a tailnet machine from a device that is not on
+       the tailnet: another computer forwarding a port to it. Once this one is
+       on the tailnet itself the relay is the worse path and usually not even
+       running, so the saved address wins and the tunnel carries it. */
+    if (pim_ts_state() == PIM_TS_RUNNING && pim_ts_is_tailnet_address(host.address)) {
+        address = host.address;
+        port = host.port;
+    } else {
+        pim_host_dial(&host, &address, &port);
+    }
+    busy("Connecting...", address);
+    if (!pim_telnet_open(address, port)) {
+        host_form(NULL);
+        message("Connection failed", "Could not reach that host. Check the address, the port and the relay.");
         return;
     }
-    telnet_screen();
+    snprintf(term_title, sizeof(term_title), "%s", host.alias[0] != '\0' ? host.alias : address);
+    term_is_ssh = host.kind == PIM_HOST_SSH;
+    ssh_host = host;
+    term_session();
 }
-static void telnet(lv_event_t *event) {
+
+/* Telnet lives on 23 and SSH on 22, so switching the kind moves the port with
+   it - but only while it still holds the other kind's default, never once the
+   user has typed their own. */
+static void host_kind_changed(lv_event_t *event) {
+    bool ssh = lv_dropdown_get_selected(host_kind_obj) == 1;
+    const char *port;
+    (void)event;
+    if (host_field[2] == NULL) return;
+    port = lv_textarea_get_text(host_field[2]);
+    if (port[0] == '\0' || strcmp(port, ssh ? "23" : "22") == 0) {
+        lv_textarea_set_text(host_field[2], ssh ? "22" : "23");
+    }
+}
+
+static void host_form(lv_event_t *event) {
+    const pim_host_t *host = NULL;
+    char options[PIM_SSH_KEY_MAX * (PIM_SSH_NAME_MAX + 2) + 8] = "(no key)";
+    char number[8];
     lv_obj_t *first;
     (void)event;
     clear();
-    label("Telnet (BBS)", 106, 8);
-    label("Host", 12, 34);
-    ui.title = text("bbs.example.com", 12, 52, 296, 28, true);
-    label("Port", 12, 88);
-    ui.content = text("23", 12, 106, 120, 28, true);
-    lv_textarea_set_text(ui.title, telnet_host);
-    lv_textarea_set_text(ui.content, telnet_port);
-    first = button("Connect", 12, 148, 120, telnet_connect, NULL);
-    button("Back", 176, 148, 120, home, NULL);
-    label("Plain text terminal, 40 columns.", 28, 200);
-    label("Colours and cursor codes are", 36, 218);
-    label("ignored. Needs a Wi-Fi network.", 28, 236);
+    hosts_reload();
+    keys_reload();
+    memset(host_field, 0, sizeof(host_field));
+    if (host_index < host_list.count) host = &host_list.hosts[host_index];
+    label(host != NULL ? "Edit connection" : "New connection", 90, 2);
+
+    label("Name", 12, 20);
+    host_field[0] = text("bbs", 12, 34, 150, 26, true);
+    label("Kind", 176, 20);
+    host_kind_obj = lv_dropdown_create(lv_screen_active());
+    lv_dropdown_set_options(host_kind_obj, "telnet\nssh");
+    crt_dropdown(host_kind_obj);
+    lv_obj_add_event_cb(host_kind_obj, host_kind_changed, LV_EVENT_VALUE_CHANGED, NULL);
+    lv_obj_set_pos(host_kind_obj, 176, 34); lv_obj_set_size(host_kind_obj, 132, 26);
+
+    label("Address", 12, 64);
+    host_field[1] = text("host.example.org", 12, 78, 296, 26, true);
+    label("Port", 12, 108);
+    host_field[2] = text("23", 12, 122, 76, 26, true);
+    label("User (ssh)", 100, 108);
+    host_field[3] = text("login", 100, 122, 208, 26, true);
+    /* No relay fields. A relay was another computer forwarding a port to a
+       tailnet machine, for a device that could not join the tailnet; this one
+       joins it, and the tunnel is taken in preference to a relay anyway. One
+       saved against an existing connection is left alone rather than wiped. */
+    label("SSH key", 12, 152);
+    for (size_t i = 0; i < key_list.count; i++) {
+        size_t used = strlen(options);
+        snprintf(options + used, sizeof(options) - used, "\n%s", key_list.keys[i].name);
+    }
+    host_key_obj = lv_dropdown_create(lv_screen_active());
+    lv_dropdown_set_options(host_key_obj, options);
+    crt_dropdown(host_key_obj);
+    lv_obj_set_pos(host_key_obj, 12, 166); lv_obj_set_size(host_key_obj, 296, 26);
+
+    if (host != NULL) {
+        lv_textarea_set_text(host_field[0], host->alias);
+        lv_textarea_set_text(host_field[1], host->address);
+        snprintf(number, sizeof(number), "%u", host->port);
+        lv_textarea_set_text(host_field[2], number);
+        lv_textarea_set_text(host_field[3], host->user);
+        lv_dropdown_set_selected(host_kind_obj, host->kind == PIM_HOST_SSH ? 1 : 0, LV_ANIM_OFF);
+        for (size_t i = 0; i < key_list.count; i++)
+            if (strcmp(key_list.keys[i].name, host->key) == 0)
+                lv_dropdown_set_selected(host_key_obj, (uint32_t)(i + 1), LV_ANIM_OFF);
+    } else {
+        lv_textarea_set_text(host_field[2], "23");
+    }
+
+    label("A tailnet address is reached through", 12, 212);
+    label("the tunnel: connect Tailscale first,", 12, 228);
+    label("under Wi-Fi & web.", 12, 244);
+    first = button("Connect", 12, 276, 92, host_connect, NULL);
+    button("Save", 114, 276, 92, host_save, NULL);
+    if (host != NULL) button("Delete", 216, 276, 92, host_delete, NULL);
+    else button("Back", 216, 276, 92, terminal_screen, NULL);
+    focus(first);
+}
+
+/* ---- SSH keys on the card ---- */
+
+static void key_detail(lv_event_t *event);
+
+static void key_delete(lv_event_t *event) {
+    (void)event;
+    if (key_index < key_list.count) pim_ssh_key_delete(SSH_DIR, key_list.keys[key_index].name);
+    term_keys_screen(NULL);
+}
+static void key_open(lv_event_t *event) {
+    key_index = index_from_event(event);
+    key_detail(NULL);
+}
+
+static void key_detail(lv_event_t *event) {
+    const pim_ssh_key_t *key;
+    char line[80];
+    lv_obj_t *first;
+    (void)event;
+    keys_reload();
+    if (key_index >= key_list.count) { term_keys_screen(NULL); return; }
+    key = &key_list.keys[key_index];
+    clear();
+    label("SSH key", 120, 6);
+    snprintf(line, sizeof(line), "Name: %s", key->name);
+    label(line, 12, 40);
+    snprintf(line, sizeof(line), "Type: %s %u bits", key->type, key->bits);
+    label(line, 12, 64);
+    snprintf(line, sizeof(line), "Private key: %s", key->has_private ? "on the card" : "missing");
+    label(line, 12, 88);
+    label("Fingerprint:", 12, 118);
+    /* 50 characters do not fit one 320 px line, so it wraps over two. */
+    snprintf(line, sizeof(line), "%.25s", key->fingerprint);
+    label(line, 12, 138);
+    snprintf(line, sizeof(line), "%s", key->fingerprint + 25);
+    label(line, 12, 156);
+    if (!key->has_private) {
+        label("Without the private half this key cannot", 12, 190);
+        label("log in.", 12, 208);
+    } else {
+        label("To use it, copy this file from the card", 12, 186);
+        snprintf(line, sizeof(line), "/PIM/ssh/%s.pub", key->name);
+        label(line, 12, 204);
+        label("into the server's authorized_keys.", 12, 222);
+    }
+    first = button("Back", 12, 276, 92, term_keys_screen, NULL);
+    button("Delete", 216, 276, 92, key_delete, NULL);
+    focus(first);
+}
+
+/* Makes a key on the device, so the private half never has to travel: only the
+   public one does, and that one is meant to be copied about. The seed comes
+   from the hardware random source. */
+static void key_create(lv_event_t *event) {
+    char name[PIM_SSH_NAME_MAX + 1];
+    (void)event;
+    snprintf(name, sizeof(name), "%s", lv_textarea_get_text(ui.title));
+    if (!pim_ssh_name_ok(name)) {
+        message("Check the name", "Up to 24 characters: lower case, digits, dash or underscore.");
+        return;
+    }
+    keys_reload();
+    if (pim_ssh_keys_find(&key_list, name) != NULL) {
+        message("Already there", "A key of that name is on the card. Delete it first, or choose another name.");
+        return;
+    }
+    busy("Making a key...", name);
+    if (!pim_ssh_key_create(SSH_DIR, name, "picocalc")) {
+        key_new_screen(NULL);
+        message("Not made", "The key could not be written. Check the card.");
+        return;
+    }
+    pim_sound_play(PIM_SOUND_SELECT);
+    keys_reload();
+    key_index = 0;
+    for (size_t i = 0; i < key_list.count; i++) {
+        if (strcmp(key_list.keys[i].name, name) == 0) key_index = i;
+    }
+    key_detail(NULL);
+}
+
+static void key_new_screen(lv_event_t *event) {
+    lv_obj_t *first;
+    (void)event;
+    clear();
+    label("New SSH key", 108, 6);
+    label("Name", 12, 40);
+    ui.title = text("picocalc", 12, 58, 296, 28, true);
+    first = button("Create", 12, 100, 120, key_create, NULL);
+    button("Back", 176, 100, 120, term_keys_screen, NULL);
+    label("An ed25519 key pair is made here, on", 12, 150);
+    label("the device. The private half stays on", 12, 168);
+    label("the card; copy <name>.pub into the", 12, 186);
+    label("server's authorized_keys to use it.", 12, 204);
+    focus(first);
+}
+
+static void term_keys_screen(lv_event_t *event) {
+    lv_obj_t *list, *first;
+    (void)event;
+    clear();
+    keys_reload();
+    label("SSH keys", 118, 6);
+    first = button("Create", 12, 282, 92, key_new_screen, NULL);
+    button("Rescan", 114, 282, 92, term_keys_screen, NULL);
+    button("Back", 216, 282, 92, terminal_screen, NULL);
+    list = lv_list_create(lv_screen_active());
+    lv_obj_set_pos(list, 8, 30); lv_obj_set_size(list, 304, 200); crt_style(list, true);
+    if (key_list.count == 0) {
+        lv_obj_t *item = lv_label_create(list);
+        lv_label_set_text(item, "No keys found in /PIM/term_memory->ssh.");
+        crt_style(item, false);
+    }
+    for (size_t i = 0; i < key_list.count; i++) {
+        lv_obj_t *item = lv_list_add_button(list, NULL, key_list.keys[i].name);
+        lv_obj_add_event_cb(item, key_open, LV_EVENT_CLICKED, (void *)(uintptr_t)(i + 1));
+        style_list_item(item);
+        list_row_still(item);
+    }
+    label("Add a key by copying <name> and", 12, 236);
+    label("<name>.pub into /PIM/ssh on the card,", 12, 252);
+    label("or pasting it in the web file editor.", 12, 268);
     focus(first);
 }
 
@@ -1808,6 +2373,12 @@ static const lv_font_t *const font_mid = &lv_font_montserrat_14;
 static const lv_font_t *const font_big = &lv_font_montserrat_14;
 
 const char *pim_ui_game_status(void) { return game_status; }
+const char *pim_ui_terminal_text(void) {
+    static char screen[PIM_VT_ROWS * (PIM_VT_COLS + 1) + 1];
+    if (!ui.terminal) { screen[0] = '\0'; return screen; }
+    pim_vt_text(&vt, screen, sizeof(screen));
+    return screen;
+}
 void pim_ui_theme_colors(uint32_t *foreground, uint32_t *background) {
     *foreground = themes[theme_index].fg;
     *background = themes[theme_index].bg;
@@ -2207,6 +2778,462 @@ static void draw_solitaire(void) {
              g->won ? " WON" : "");
 }
 
+/* ---- Terminal rendering: an 8x8 cell grid drawn straight onto the board ---- */
+
+#define TERM_CELL 8
+
+/* The screen is one colour, so ANSI colour folds onto the theme's brightness
+   levels: contrast survives, which is the part the host actually meant. */
+static uint32_t term_fg_color(uint8_t index) {
+    if (index == 0) return G_DARK;
+    if (index >= 7) return G_AMBER;
+    return G_DIM;
+}
+static uint32_t term_bg_color(uint8_t index) {
+    if (index == 0) return G_BLACK;
+    if (index == 7) return G_DIM;
+    return G_DARK;
+}
+static void term_colors(uint8_t attr, uint32_t *foreground, uint32_t *background) {
+    uint32_t fg = term_fg_color(PIM_VT_FG(attr));
+    uint32_t bg = term_bg_color(PIM_VT_BG(attr));
+    if ((attr & PIM_VT_INVERSE) != 0) { uint32_t swap = fg; fg = bg; bg = swap; }
+    if (fg == bg) fg = (bg == G_AMBER) ? G_BLACK : G_AMBER;
+    *foreground = fg;
+    *background = bg;
+}
+
+/* Box drawing, which the 8x8 font has no glyphs for: how far each arm reaches
+   and whether it is drawn single or double. */
+typedef struct { uint8_t code, up, down, left, right; } term_box_t;
+static const term_box_t term_boxes[] = {
+    {0xc4, 0, 0, 1, 1}, {0xb3, 1, 1, 0, 0}, {0xda, 0, 1, 0, 1}, {0xbf, 0, 1, 1, 0},
+    {0xc0, 1, 0, 0, 1}, {0xd9, 1, 0, 1, 0}, {0xc3, 1, 1, 0, 1}, {0xb4, 1, 1, 1, 0},
+    {0xc2, 0, 1, 1, 1}, {0xc1, 1, 0, 1, 1}, {0xc5, 1, 1, 1, 1},
+    {0xcd, 0, 0, 2, 2}, {0xba, 2, 2, 0, 0}, {0xc9, 0, 2, 0, 2}, {0xbb, 0, 2, 2, 0},
+    {0xc8, 2, 0, 0, 2}, {0xbc, 2, 0, 2, 0}, {0xcc, 2, 2, 0, 2}, {0xb9, 2, 2, 2, 0},
+    {0xcb, 0, 2, 2, 2}, {0xca, 2, 0, 2, 2}, {0xce, 2, 2, 2, 2},
+    {0xd5, 0, 1, 0, 2}, {0xd6, 0, 2, 0, 1}, {0xb5, 1, 1, 2, 0}, {0xb6, 2, 2, 1, 0},
+    {0xb7, 0, 2, 1, 0}, {0xb8, 0, 1, 2, 0}, {0xbd, 2, 0, 1, 0}, {0xbe, 1, 0, 2, 0},
+    {0xc6, 1, 1, 0, 2}, {0xc7, 2, 2, 0, 1}, {0xcf, 1, 0, 2, 2}, {0xd0, 2, 0, 1, 1},
+    {0xd1, 0, 1, 2, 2}, {0xd2, 0, 2, 1, 1}, {0xd3, 2, 0, 0, 1}, {0xd4, 1, 0, 0, 2},
+    {0xd7, 2, 2, 1, 1}, {0xd8, 1, 1, 2, 2}
+};
+
+static void term_draw_box(const term_box_t *box, int px, int py, uint32_t color) {
+    static const int single[2] = {3, 0}, twin[2] = {2, 5};
+    const int *offsets;
+    int count, i;
+#define TERM_ARM(weight) (offsets = (weight) == 2 ? twin : single, count = (weight) == 2 ? 2 : 1)
+    if (box->up != 0)    { TERM_ARM(box->up);    for (i = 0; i < count; i++) gfill(px + offsets[i], py, 1, 4, color); }
+    if (box->down != 0)  { TERM_ARM(box->down);  for (i = 0; i < count; i++) gfill(px + offsets[i], py + 3, 1, 5, color); }
+    if (box->left != 0)  { TERM_ARM(box->left);  for (i = 0; i < count; i++) gfill(px, py + offsets[i], 4, 1, color); }
+    if (box->right != 0) { TERM_ARM(box->right); for (i = 0; i < count; i++) gfill(px + 3, py + offsets[i], 5, 1, color); }
+#undef TERM_ARM
+}
+
+/* Everything the font cannot show: lines, blocks, shades and a few symbols.
+   Shading is drawn as a flat dimmer fill rather than a dot pattern, which at
+   this size reads the same and costs one rectangle instead of sixty-four. */
+static void term_draw_glyph(uint8_t ch, int px, int py, uint32_t color) {
+    size_t i;
+    for (i = 0; i < sizeof(term_boxes) / sizeof(term_boxes[0]); i++) {
+        if (term_boxes[i].code == ch) { term_draw_box(&term_boxes[i], px, py, color); return; }
+    }
+    switch (ch) {
+    case 0xdb: gfill(px, py, 8, 8, color); break;
+    case 0xdf: gfill(px, py, 8, 4, color); break;
+    case 0xdc: gfill(px, py + 4, 8, 4, color); break;
+    case 0xdd: gfill(px, py, 4, 8, color); break;
+    case 0xde: gfill(px + 4, py, 4, 8, color); break;
+    case 0xb0: gfill(px, py, 8, 8, G_DARK); break;
+    case 0xb1: gfill(px, py, 8, 8, G_DIM); break;
+    case 0xb2: gfill(px, py, 8, 8, color); break;
+    case 0xfe: gfill(px + 2, py + 2, 4, 4, color); break;
+    case 0x04: gfill(px + 3, py + 2, 2, 4, color); gfill(px + 2, py + 3, 4, 2, color); break;
+    case 0x07: gfill(px + 3, py + 3, 2, 2, color); break;
+    case 0x1e:
+        gfill(px + 3, py + 2, 2, 1, color); gfill(px + 2, py + 3, 4, 1, color);
+        gfill(px + 1, py + 4, 6, 1, color); gfill(px, py + 5, 8, 1, color);
+        break;
+    case 0x1f:
+        gfill(px, py + 2, 8, 1, color); gfill(px + 1, py + 3, 6, 1, color);
+        gfill(px + 2, py + 4, 4, 1, color); gfill(px + 3, py + 5, 2, 1, color);
+        break;
+    default: gframe(px + 1, py + 1, 6, 6, 1, color); break;
+    }
+}
+
+/* unscii is a nine pixel line, so it starts a pixel above its cell and the next
+   row's background clips any descender, exactly as an 8x8 terminal does. */
+static void term_text(const char *value, int px, int py, uint32_t color) {
+    lv_draw_label_dsc_t dsc;
+    lv_area_t area = {px, py - 1, 319, py + 10};
+    lv_draw_label_dsc_init(&dsc);
+    dsc.text = value;
+    dsc.text_local = 1;
+    dsc.font = &lv_font_unscii_8;
+    dsc.color = lv_color_hex(color);
+    dsc.align = LV_TEXT_ALIGN_LEFT;
+    dsc.letter_space = 0;
+    dsc.line_space = 0;
+    lv_draw_label(gl, &dsc, &area);
+}
+
+static void term_draw_row(unsigned row, const pim_vt_cell_t *cells) {
+    char run[PIM_VT_COLS + 1];
+    int py = (int)(row * TERM_CELL);
+    unsigned x = 0;
+    while (x < PIM_VT_COLS) {               /* backgrounds, in runs of one colour */
+        uint32_t fg, bg, next_fg, next_bg;
+        unsigned end = x + 1;
+        term_colors(cells[x].attr, &fg, &bg);
+        while (end < PIM_VT_COLS) {
+            term_colors(cells[end].attr, &next_fg, &next_bg);
+            if (next_bg != bg) break;
+            end++;
+        }
+        if (bg != G_BLACK) gfill((int)(x * TERM_CELL), py, (int)((end - x) * TERM_CELL), TERM_CELL, bg);
+        x = end;
+    }
+    x = 0;
+    while (x < PIM_VT_COLS) {               /* text, in runs of one colour */
+        uint32_t fg, bg, next_fg, next_bg;
+        unsigned end = x, length = 0;
+        term_colors(cells[x].attr, &fg, &bg);
+        while (end < PIM_VT_COLS) {
+            char ascii;
+            term_colors(cells[end].attr, &next_fg, &next_bg);
+            if (next_fg != fg) break;
+            ascii = pim_vt_ascii(cells[end].ch);
+            run[length++] = ascii == 0 ? ' ' : ascii;
+            end++;
+        }
+        run[length] = '\0';
+        term_text(run, (int)(x * TERM_CELL), py, fg);
+        x = end;
+    }
+    for (x = 0; x < PIM_VT_COLS; x++) {     /* the glyphs the font does not have */
+        if (cells[x].ch != 0 && pim_vt_ascii(cells[x].ch) == 0) {
+            uint32_t fg, bg;
+            term_colors(cells[x].attr, &fg, &bg);
+            term_draw_glyph(cells[x].ch, (int)(x * TERM_CELL), py, fg);
+        }
+    }
+}
+
+static void term_draw(lv_event_t *event) {
+    unsigned row;
+    gl = lv_event_get_layer(event);
+    for (row = 0; row < PIM_VT_ROWS; row++) term_draw_row(row, pim_vt_view_row(&vt, term_scroll, row));
+    /* The cursor is a filled cell with the character knocked out of it. */
+    if (vt.cursor_visible && term_scroll == 0 && pim_telnet_is_open()) {
+        const pim_vt_cell_t *cells = pim_vt_view_row(&vt, 0, vt.cy);
+        uint32_t fg, bg;
+        char glyph[2];
+        int px = (int)(vt.cx * TERM_CELL), py = (int)(vt.cy * TERM_CELL);
+        term_colors(cells[vt.cx].attr, &fg, &bg);
+        gfill(px, py, TERM_CELL, TERM_CELL, fg);
+        glyph[0] = pim_vt_ascii(cells[vt.cx].ch);
+        glyph[1] = '\0';
+        if (glyph[0] == 0) term_draw_glyph(cells[vt.cx].ch, px, py, bg);
+        else if (glyph[0] != ' ') term_text(glyph, px, py, bg);
+    }
+}
+
+/* ---- the session ---- */
+
+static void term_status(void) {
+    char line[64];
+    if (term_status_obj == NULL) return;
+    if (term_is_ssh && pim_telnet_is_open() && pim_ssh_state(&term_memory->ssh) < PIM_SSH_READY) {
+        static const char *const stage[] = {
+            "closed", "greeting", "exchanging keys", "host key?", "signing in", "opening a shell"
+        };
+        unsigned at = (unsigned)pim_ssh_state(&term_memory->ssh);
+        snprintf(line, sizeof(line), "%s  %s", term_title,
+                 at < sizeof(stage) / sizeof(stage[0]) ? stage[at] : "working");
+    }
+    else if (!pim_telnet_is_open()) snprintf(line, sizeof(line), "%s  disconnected - ESC leaves", term_title);
+    else if (term_scroll > 0) snprintf(line, sizeof(line), "%s  back %u of %u lines", term_title, term_scroll,
+                                       pim_vt_max_scroll(&vt));
+    else snprintf(line, sizeof(line), "%s  ESC quit  PgUp/Dn scroll  Brk=Esc", term_title);
+    lv_label_set_text(term_status_obj, line);
+}
+
+/* Only the rows that changed are repainted; the cursor drags its old and new
+   rows along, since moving it marks nothing dirty. */
+static void term_refresh(void) {
+    unsigned row, low = PIM_VT_ROWS, high = 0;
+    if (ui.board == NULL) return;
+    for (row = 0; row < PIM_VT_ROWS; row++) {
+        if (pim_vt_row_dirty(&vt, row, NULL, NULL)) { if (row < low) low = row; high = row; }
+    }
+    if (vt.cy != term_cursor_row || vt.cx != term_cursor_col) {
+        if (term_cursor_row < low) low = term_cursor_row;
+        if (term_cursor_row > high) high = term_cursor_row;
+        if (vt.cy < low) low = vt.cy;
+        if (vt.cy > high) high = vt.cy;
+        term_cursor_row = vt.cy;
+        term_cursor_col = vt.cx;
+    }
+    if (low > high) return;
+    {
+        lv_area_t area = {0, (int32_t)(low * TERM_CELL), 319, (int32_t)(high * TERM_CELL + TERM_CELL - 1)};
+        lv_obj_invalidate_area(ui.board, &area);
+    }
+    pim_vt_clear_dirty(&vt);
+    term_status();
+}
+
+static void term_send_raw(const uint8_t *bytes, size_t length) {
+    if (length > 0 && pim_telnet_is_open()) pim_telnet_write(bytes, length);
+}
+/* Protocol answers already contain real IAC bytes and go out untouched; screen
+   bytes are payload, so a stray 0xff in them has to be doubled. */
+static void term_send_data(const uint8_t *bytes, size_t length) {
+    uint8_t wire[32];
+    size_t count = pim_iac_encode(&iac, bytes, length, wire, sizeof(wire));
+    term_send_raw(wire, count);
+}
+
+/* Writes a line into the terminal itself, which is where the user is looking. */
+static void term_note(const char *text) {
+    uint8_t reply[32];
+    pim_vt_feed(&vt, (const uint8_t *)text, strlen(text), reply, sizeof(reply));
+}
+
+static void term_leave(lv_event_t *event) {
+    (void)event;
+    pim_telnet_close();
+    pim_input_set_terminal_mode(false);
+    term_memory_release();
+    terminal_screen(NULL);
+}
+
+/* The keyboard hands us raw device codes in terminal mode, so the keys a
+   terminal needs - control codes, function keys, Page Up - all arrive. */
+static int term_translate(uint32_t key) {
+    if (key >= 0x20 && key <= 0x7e) return (int)key;
+    if ((key & PIM_UI_TERM_KEY) != PIM_UI_TERM_KEY) {
+        switch (key) {                      /* plain LVGL keys, as the simulator sends them */
+        case LV_KEY_ENTER: return '\r';
+        case LV_KEY_BACKSPACE: return 0x08;
+        case LV_KEY_UP: return PIM_VT_KEY_UP;
+        case LV_KEY_DOWN: return PIM_VT_KEY_DOWN;
+        case LV_KEY_LEFT: return PIM_VT_KEY_LEFT;
+        case LV_KEY_RIGHT: return PIM_VT_KEY_RIGHT;
+        case LV_KEY_HOME: return PIM_VT_KEY_HOME;
+        case LV_KEY_END: return PIM_VT_KEY_END;
+        case LV_KEY_DEL: return PIM_VT_KEY_DELETE;
+        default: return -1;
+        }
+    }
+    switch (key & 0xffu) {
+    case 0xb5: return PIM_VT_KEY_UP;
+    case 0xb6: return PIM_VT_KEY_DOWN;
+    case 0xb4: return PIM_VT_KEY_LEFT;
+    case 0xb7: return PIM_VT_KEY_RIGHT;
+    case 0xd1: return PIM_VT_KEY_INSERT;
+    case 0xd2: return PIM_VT_KEY_HOME;
+    case 0xd4: return PIM_VT_KEY_DELETE;
+    case 0xd5: return PIM_VT_KEY_END;
+    case 0xd0: return 0x1b;                 /* Break sends a real Escape */
+    case 0x81: return PIM_VT_KEY_F1;
+    case 0x82: return PIM_VT_KEY_F2;
+    case 0x83: return PIM_VT_KEY_F3;
+    case 0x84: return PIM_VT_KEY_F4;
+    case 0x85: return PIM_VT_KEY_F5;
+    case 0x86: return PIM_VT_KEY_F6;
+    case 0x87: return PIM_VT_KEY_F7;
+    case 0x88: return PIM_VT_KEY_F8;
+    case 0x89: return PIM_VT_KEY_F9;
+    case 0x90: return PIM_VT_KEY_F10;
+    case 0x0a: case 0x0d: return '\r';
+    default: break;
+    }
+    /* Ctrl with a letter arrives already folded to a control code. */
+    if ((key & 0xffu) < 0x20) return (int)(key & 0xffu);
+    return -1;
+}
+
+static void term_key(lv_event_t *event) {
+    uint32_t key = lv_event_get_key(event);
+    uint8_t out[8];
+    int translated;
+    size_t count;
+    if (key == LV_KEY_ESC) { term_leave(NULL); return; }
+    /* While a host key is on screen the only answers are yes and Esc. */
+    if (ssh_prompt_pending) {
+        if (key == 'y' || key == 'Y') {
+            size_t wire_length = 0;
+            ssh_prompt_pending = false;
+            pim_ssh_known_host_remember(KNOWN_HOSTS_FILE, ssh_host.alias, pim_ssh_fingerprint(&term_memory->ssh));
+            pim_ssh_accept_host_key(&term_memory->ssh, ssh_wire, sizeof(ssh_wire), &wire_length);
+            if (wire_length > 0) term_send_raw(ssh_wire, wire_length);
+            term_note("\r\nAccepted and remembered.\r\n");
+            term_refresh();
+        }
+        return;
+    }
+    if ((key & PIM_UI_TERM_KEY) == PIM_UI_TERM_KEY) {
+        unsigned code = key & 0xffu;
+        if (code == 0xd6 || code == 0xd7) {     /* Page Up and Page Down browse the scrollback */
+            unsigned page = PIM_VT_ROWS / 2u;
+            unsigned most = pim_vt_max_scroll(&vt);
+            if (code == 0xd6) term_scroll = term_scroll + page < most ? term_scroll + page : most;
+            else term_scroll = term_scroll > page ? term_scroll - page : 0;
+            if (ui.board != NULL) lv_obj_invalidate(ui.board);
+            term_status();
+            return;
+        }
+    }
+    if (!pim_telnet_is_open()) return;
+    translated = term_translate(key);
+    if (translated < 0) return;
+    term_scroll = 0;                            /* typing returns to the newest output */
+    count = pim_vt_encode_key(&vt, translated, out, sizeof(out));
+    if (count == 0) return;
+    if (term_is_ssh) {
+        size_t n = pim_ssh_send(&term_memory->ssh, out, count, ssh_wire, sizeof(ssh_wire));
+        if (n > 0) term_send_raw(ssh_wire, n);
+        term_refresh();
+        return;                         /* the shell does the echoing */
+    }
+    term_send_data(out, count);
+    /* With no remote echo the host will never show what was typed, so we do. */
+    if (!iac.remote_echo && translated >= 0x20 && translated <= 0x7e) {
+        uint8_t echo = (uint8_t)translated, reply[8];
+        pim_vt_feed(&vt, &echo, 1, reply, sizeof(reply));
+    } else if (!iac.remote_echo && translated == '\r') {
+        uint8_t reply[8];
+        pim_vt_feed(&vt, (const uint8_t *)"\r\n", 2, reply, sizeof(reply));
+    }
+    term_refresh();
+}
+
+/* Watches the session for the two things that need the user: a host key nobody
+   has vouched for, and a failure. Both are shown in the terminal rather than in
+   a dialog, because a dialog would tear down the screen the socket belongs to. */
+static void ssh_check_state(void) {
+    char line[128];
+    switch (pim_ssh_state(&term_memory->ssh)) {
+    case PIM_SSH_HOSTKEY_UNKNOWN:
+        if (ssh_prompt_pending) break;
+        ssh_prompt_pending = true;
+        term_note("\r\n");
+        snprintf(line, sizeof(line), "%s is not a host this device knows.\r\n", ssh_host.alias);
+        term_note(line);
+        snprintf(line, sizeof(line), "Its key is %s\r\n", pim_ssh_fingerprint(&term_memory->ssh));
+        term_note(line);
+        term_note("Check that against the server, then press Y to\r\n");
+        term_note("accept and remember it, or ESC to leave.\r\n");
+        break;
+    case PIM_SSH_FAILED:
+        if (ssh_reported) break;
+        ssh_reported = true;
+        snprintf(line, sizeof(line), "\r\n[%s]\r\n", pim_ssh_error(&term_memory->ssh));
+        term_note(line);
+        pim_telnet_close();
+        break;
+    default:
+        break;
+    }
+}
+
+static void term_tick(lv_timer_t *timer) {
+    uint8_t chunk[256], screen_bytes[256], reply[96], answer[96];
+    size_t count;
+    (void)timer;
+    while ((count = pim_telnet_read(chunk, sizeof(chunk))) > 0) {
+        if (term_is_ssh) {
+            /* The SSH client answers on the wire and hands up terminal bytes;
+               its buffers are larger than telnet's because one packet can carry
+               a screenful. */
+            size_t wire_length = 0;
+            size_t text_length = pim_ssh_feed(&term_memory->ssh, chunk, count, ssh_wire, sizeof(ssh_wire),
+                                              &wire_length, ssh_text, sizeof(ssh_text));
+            if (wire_length > 0) term_send_raw(ssh_wire, wire_length);
+            if (text_length > 0) {
+                size_t owed = pim_vt_feed(&vt, ssh_text, text_length, answer, sizeof(answer));
+                if (owed > 0) {
+                    size_t n = pim_ssh_send(&term_memory->ssh, answer, owed, ssh_wire, sizeof(ssh_wire));
+                    if (n > 0) term_send_raw(ssh_wire, n);
+                }
+            }
+            ssh_check_state();
+            continue;
+        }
+        {
+            size_t protocol = 0;
+            size_t payload = pim_iac_feed(&iac, chunk, count, screen_bytes, sizeof(screen_bytes),
+                                          reply, sizeof(reply), &protocol);
+            if (protocol > 0) term_send_raw(reply, protocol);
+            if (payload > 0) {
+                size_t owed = pim_vt_feed(&vt, screen_bytes, payload, answer, sizeof(answer));
+                if (owed > 0) term_send_data(answer, owed);
+            }
+        }
+    }
+    if (!pim_telnet_is_open() && !term_notified) {
+        static const uint8_t note[] = "\r\n[disconnected - ESC to leave]\r\n";
+        pim_vt_feed(&vt, note, sizeof(note) - 1, reply, sizeof(reply));
+        term_notified = true;
+        pim_input_set_terminal_mode(false);
+    }
+    term_refresh();
+}
+
+static void term_session(void) {
+    clear();
+    if (!term_memory_ensure()) {
+        message("Terminal", "Not enough memory for a session.");
+        terminal_screen(NULL);
+        return;
+    }
+    /* clear() resets this, so the protocol is read back from the connection
+       that was dialled rather than set before the screen is built. */
+    term_is_ssh = ssh_host.kind == PIM_HOST_SSH;
+    pim_vt_init(&vt);
+    /* A BBS draws with CP437 and a Unix host speaks UTF-8. Said here rather
+       than left to the default, because it is a real choice: in CP437 a UTF-8
+       host's accented characters come out as two glyphs. */
+    pim_vt_set_encoding(&vt, term_is_ssh ? PIM_VT_UTF8 : PIM_VT_CP437);
+    pim_iac_init(&iac, PIM_VT_COLS, PIM_VT_ROWS);
+    term_scroll = 0;
+    term_notified = false;
+    ssh_prompt_pending = false;
+    ssh_reported = false;
+    term_cursor_row = 0;
+    term_cursor_col = 0;
+    ui.terminal = true;
+    pim_input_set_terminal_mode(true);
+    ui.board = lv_obj_create(lv_screen_active());
+    lv_obj_set_size(ui.board, 320, 320); lv_obj_set_pos(ui.board, 0, 0);
+    lv_obj_remove_flag(ui.board, LV_OBJ_FLAG_SCROLLABLE);
+    crt_style(ui.board, false);
+    lv_obj_set_style_pad_all(ui.board, 0, 0);
+    lv_obj_set_style_outline_width(ui.board, 0, LV_STATE_ANY);
+    lv_obj_add_event_cb(ui.board, term_draw, LV_EVENT_DRAW_MAIN, NULL);
+    lv_obj_add_event_cb(ui.board, term_key, LV_EVENT_KEY, NULL);
+    term_status_obj = lv_label_create(lv_screen_active());
+    lv_obj_set_pos(term_status_obj, 2, 305);
+    lv_obj_set_style_text_font(term_status_obj, font_small, 0);
+    crt_style(term_status_obj, false);
+    term_status();
+    if (lv_obj_get_group(ui.board) == NULL) lv_group_add_obj(lv_group_get_default(), ui.board);
+    focus(ui.board);
+    if (term_is_ssh) {
+        size_t count = pim_ssh_start(&term_memory->ssh, &ssh_config, ssh_wire, sizeof(ssh_wire));
+        if (count > 0) pim_telnet_write(ssh_wire, count);
+    } else {
+        uint8_t hello[16];
+        size_t count = pim_iac_hello(&iac, hello, sizeof(hello));
+        if (count > 0) pim_telnet_write(hello, count);
+    }
+    ui.timer = lv_timer_create(term_tick, 40, NULL);
+}
+
 static void board_draw(lv_event_t *event) {
     gl = lv_event_get_layer(event);
     if (ui.game == GAME_TETRIS) draw_tetris();
@@ -2400,6 +3427,7 @@ static void theme_load(void) {
         for (size_t i = 0; i < THEME_COUNT; i++)
             if (strncmp(name, themes[i].name, strlen(themes[i].name)) == 0) theme_index = i;
     fclose(file);
+    if (styles_created) styles_refresh(true);
 }
 static void theme_save(void) {
     FILE *file = fopen(THEME_FILE, "wb");
@@ -2411,6 +3439,8 @@ static void theme_pick(lv_event_t *event) {
     size_t index = index_from_event(event);
     if (index >= THEME_COUNT) return;
     theme_index = index;
+    /* The shared styles hold the colours, so they are what has to change. */
+    styles_refresh(true);
     theme_save();
     theme_screen(NULL);
     focus(lv_obj_get_child(lv_screen_active(), (int32_t)index + 1));
@@ -2583,6 +3613,125 @@ static void startup_sync(lv_event_t *event) {
     startup_screen();
     message("Time synced", "Check the fields, then press Start.");
 }
+/* ---- the startup PIN ---- */
+
+static void pin_screen(lv_event_t *event);
+
+static void pin_save(lv_event_t *event) {
+    const char *current = lv_textarea_get_text(ui.title);
+    const char *fresh = lv_textarea_get_text(ui.content);
+    bool already = pim_lock_is_set(LOCK_FILE);
+    (void)event;
+    if (already && !pim_lock_check(LOCK_FILE, current)) {
+        message("Wrong PIN", "The current PIN does not match.");
+        return;
+    }
+    if (!pim_lock_pin_ok(fresh)) {
+        message("Six digits", "A PIN is exactly six digits, 0 to 9.");
+        return;
+    }
+    if (!pim_lock_set(LOCK_FILE, fresh)) {
+        message("Not saved", "The PIN could not be written. Check the card.");
+        return;
+    }
+    pim_sound_play(PIM_SOUND_SELECT);
+    pin_screen(NULL);                   /* now it offers Change and Remove */
+    message("PIN set", "It will be asked for next time the device starts.");
+}
+
+static void pin_remove(lv_event_t *event) {
+    const char *current = lv_textarea_get_text(ui.title);
+    (void)event;
+    if (!pim_lock_check(LOCK_FILE, current)) {
+        message("Wrong PIN", "Enter the current PIN to remove it.");
+        return;
+    }
+    pim_lock_clear(LOCK_FILE);
+    pin_screen(NULL);
+    message("PIN removed", "The device will start without asking.");
+}
+
+static void pin_screen(lv_event_t *event) {
+    bool already = pim_lock_is_set(LOCK_FILE);
+    (void)event;
+    clear();
+    label("Device PIN", 112, 6);
+    if (already) {
+        label("Current PIN", 12, 36);
+        ui.title = text("------", 12, 54, 140, 32, true);
+        lv_textarea_set_password_mode(ui.title, true);
+        lv_textarea_set_max_length(ui.title, PIM_LOCK_DIGITS);
+        lv_textarea_set_accepted_chars(ui.title, "0123456789");
+    } else {
+        ui.title = text("", 12, 54, 140, 32, true);
+        lv_obj_add_flag(ui.title, LV_OBJ_FLAG_HIDDEN);
+    }
+    label(already ? "New PIN" : "New six digit PIN", 12, 96);
+    ui.content = text("------", 12, 114, 140, 32, true);
+    lv_textarea_set_password_mode(ui.content, true);
+    lv_textarea_set_max_length(ui.content, PIM_LOCK_DIGITS);
+    lv_textarea_set_accepted_chars(ui.content, "0123456789");
+    button(already ? "Change" : "Set PIN", 12, 160, 120, pin_save, NULL);
+    if (already) button("Remove", 176, 160, 120, pin_remove, NULL);
+    button("Back", 12, 196, 120, tools_screen, NULL);
+    label("Asked for when the device starts.", 12, 240);
+    label("The SD card is not encrypted, so this", 12, 258);
+    label("stops a person, not a card reader.", 12, 276);
+    focus(already ? ui.title : ui.content);
+}
+
+static uint8_t lock_failures;
+static uint32_t lock_wait_until;        /* ms since boot, while a wait is being served */
+
+static void lock_entered(lv_event_t *event) {
+    const char *typed = lv_textarea_get_text(ui.title);
+    uint32_t now_ms = to_ms_since_boot(get_absolute_time());
+    (void)event;
+    if (strlen(typed) < PIM_LOCK_DIGITS) return;        /* still typing */
+    if (now_ms < lock_wait_until) {
+        lv_textarea_set_text(ui.title, "");
+        return;                                          /* serving a wait; say nothing */
+    }
+    if (pim_lock_check(LOCK_FILE, typed)) {
+        device_locked = false;
+        lock_failures = 0;
+        pim_sound_play(PIM_SOUND_SELECT);
+        /* Carry on with the normal startup now that the device is open. */
+        if (auto_start()) home(NULL); else startup_screen();
+        return;
+    }
+    /* Three tries, then a growing wait: enough to make guessing by hand
+       pointless without ever locking the owner out. */
+    lv_textarea_set_text(ui.title, "");
+    if (++lock_failures >= 3) {
+        unsigned seconds = 5u * (unsigned)(lock_failures - 2);
+        if (seconds > 60u) seconds = 60u;
+        lock_wait_until = now_ms + seconds * 1000u;
+        lv_label_set_text(ui.preview, "Wrong. Wait a moment and try again.");
+    } else {
+        lv_label_set_text(ui.preview, "Wrong PIN.");
+    }
+    pim_sound_play(PIM_SOUND_HURT);
+}
+
+static void lock_screen(void) {
+    clear();
+    device_locked = true;
+    label("PicoDeck OS", 105, 60);
+    label("Enter your six digit PIN", 60, 110);
+    ui.title = text("------", 90, 140, 140, 34, true);
+    lv_textarea_set_password_mode(ui.title, true);
+    lv_textarea_set_max_length(ui.title, PIM_LOCK_DIGITS);
+    lv_textarea_set_accepted_chars(ui.title, "0123456789");
+    lv_textarea_set_text(ui.title, "");
+    /* Checked as the sixth digit lands, so there is no key to press after it. */
+    lv_obj_add_event_cb(ui.title, lock_entered, LV_EVENT_VALUE_CHANGED, NULL);
+    ui.preview = label("", 60, 190);
+    label("The card itself is not encrypted:", 24, 240);
+    label("this keeps people out, not a reader.", 18, 258);
+    focus(ui.title);
+}
+
 static void startup_screen(void) {
     static const char *const names[] = {"Day", "Month", "Year", "Hour", "Min"};
     static const int widths[] = {52, 52, 76, 52, 52}, xs[] = {8, 66, 124, 208, 266};
@@ -2619,6 +3768,11 @@ static bool auto_start(void) {
     uint16_t minutes;
     int count, best = -1, best_rssi = -1000;
     if (ui.storage_path == NULL) return false;
+    /* If the last start died bringing Wi-Fi up, do not walk into it again: a
+       device that strands itself on the same screen every time cannot even be
+       used to read what went wrong. The report is on the home screen, and
+       Wi-Fi & web still joins by hand. */
+    if (pim_boot_skip_wifi()) return false;
     wifi_cfg_load();
     if (wifi_cfg.count == 0) return false;
     pim_system_busy(true);
@@ -2678,6 +3832,19 @@ static void low_battery_check(lv_timer_t *timer) {
     lv_timer_set_repeat_count(lv_timer_create(low_banner_remove, 8000, NULL), 1);
 }
 
+/* Joining Wi-Fi at startup, one turn of the UI loop later rather than right
+   here. pim_ui_start runs before the scheduler does, and in the FreeRTOS build
+   the radio driver's worker task cannot run until it has started - so bringing
+   the radio up from here waited for an answer that could never come, and the
+   device sat on the startup screen for ever. A timer callback runs inside
+   lv_timer_handler, which is the main loop in one build and the UI task in the
+   other, so this is right in both without asking which. */
+static void auto_start_tick(lv_timer_t *timer) {
+    (void)timer;
+    if (auto_start()) home(NULL);
+    else startup_screen();
+}
+
 void pim_ui_start(pim_database_t *database, const char *storage_path) {
     static const pim_wifi_hooks_t hooks = {web_today, web_changed};
     ui = (ui_t){.database = database, .storage_path = storage_path, .calendar = {2026, 1, 1}, .today = {2026, 1, 1}, .base_minutes = 540, .spin = {9, 0, 3}};
@@ -2685,7 +3852,7 @@ void pim_ui_start(pim_database_t *database, const char *storage_path) {
     low_banner = NULL;
     low_warned = false;
     if (!low_timer_started) { low_timer_started = true; lv_timer_create(low_battery_check, 10000, NULL); }
-    telnet_host[0] = '\0';
+    hosts_ready = false;
     theme_load();
     sound_load();
     today_load();
@@ -2694,5 +3861,11 @@ void pim_ui_start(pim_database_t *database, const char *storage_path) {
     pim_wifi_attach(database, storage_path, PIM_ROOT, &hooks);
     if (storage_path != NULL) { pim_games_set_root(PIM_ROOT); pim_games_prepare(PIM_ROOT); }
     recur_reload();
-    if (auto_start()) home(NULL); else startup_screen();
+    /* The lock comes before everything, including the clock screen: until the
+       PIN is accepted nothing else is reachable. */
+    if (pim_lock_is_set(LOCK_FILE)) lock_screen();
+    else {
+        busy("Starting...", "");
+        lv_timer_set_repeat_count(lv_timer_create(auto_start_tick, 10, NULL), 1);
+    }
 }

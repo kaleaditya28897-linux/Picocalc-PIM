@@ -7,3 +7,6 @@
 [submodule "third_party/pico-vfs"]
 	path = third_party/pico-vfs
 	url = https://github.com/oyama/pico-vfs.git
+[submodule "third_party/FreeRTOS-Kernel"]
+	path = third_party/FreeRTOS-Kernel
+	url = https://github.com/raspberrypi/FreeRTOS-Kernel.git

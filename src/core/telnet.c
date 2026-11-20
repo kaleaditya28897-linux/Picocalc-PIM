@@ -2,133 +2,190 @@
 
 #include <string.h>
 
-enum { S_TEXT, S_IAC, S_VERB, S_SUB, S_SUB_IAC, S_ESC, S_CSI };
+enum { S_DATA, S_IAC, S_VERB, S_SUB, S_SUB_IAC };
 enum { IAC = 255, DONT = 254, DO = 253, WONT = 252, WILL = 251, SB = 250, SE = 240 };
-enum { OPT_ECHO = 1, OPT_SGA = 3 };
+enum { OPT_BINARY = 0, OPT_ECHO = 1, OPT_SGA = 3, OPT_TTYPE = 24, OPT_NAWS = 31 };
+enum { TTYPE_IS = 0, TTYPE_SEND = 1 };
 
-void pim_term_init(pim_term_t *term) {
-    memset(term, 0, sizeof(*term));
-    term->count = 1;
+/* What we claim to be, in the order the host may ask for it. A BBS that sees
+   "ansi" sends colour; "vt100" is the fallback for hosts that want a real DEC. */
+static const char *const terminal_types[] = { "ansi", "vt100" };
+#define TYPE_COUNT (sizeof(terminal_types) / sizeof(terminal_types[0]))
+
+void pim_iac_init(pim_iac_t *iac, unsigned cols, unsigned rows) {
+    memset(iac, 0, sizeof(*iac));
+    iac->cols = (uint8_t)(cols > 255 ? 255 : cols);
+    iac->rows = (uint8_t)(rows > 255 ? 255 : rows);
 }
 
-static char *current(pim_term_t *term) { return term->lines[(term->first + term->count - 1) % PIM_TERM_LINES]; }
-
-static void newline(pim_term_t *term) {
-    if (term->count == PIM_TERM_LINES) term->first = (uint16_t)((term->first + 1) % PIM_TERM_LINES);
-    else term->count++;
-    memset(current(term), 0, PIM_TERM_COLS + 1);
-    term->column = 0;
+static void put_byte(uint8_t *out, size_t size, size_t *used, uint8_t value) {
+    if (*used < size) out[(*used)++] = value;
 }
 
-static void put(pim_term_t *term, char c) {
-    if (term->column >= PIM_TERM_COLS) newline(term);
-    current(term)[term->column++] = c;
-}
-
-static void add_reply(uint8_t *reply, size_t size, size_t *used, uint8_t verb, uint8_t option) {
+static void command(uint8_t *out, size_t size, size_t *used, uint8_t verb, uint8_t option) {
     if (*used + 3 > size) return;
-    reply[(*used)++] = IAC;
-    reply[(*used)++] = verb;
-    reply[(*used)++] = option;
+    out[(*used)++] = IAC;
+    out[(*used)++] = verb;
+    out[(*used)++] = option;
 }
 
-static void negotiate(pim_term_t *term, uint8_t verb, uint8_t option, uint8_t *reply, size_t size, size_t *used) {
-    if (verb == WILL) {
-        if (option == OPT_ECHO) {
-            if (!term->remote_echo) add_reply(reply, size, used, DO, option);
-            term->remote_echo = true;
-        } else if (option == OPT_SGA) {
-            add_reply(reply, size, used, DO, option);
-        } else {
-            add_reply(reply, size, used, DONT, option);
-        }
-    } else if (verb == WONT) {
-        if (option == OPT_ECHO) term->remote_echo = false;
-    } else if (verb == DO) {
-        add_reply(reply, size, used, option == OPT_SGA ? WILL : WONT, option);
-    }
-}
-
-size_t pim_term_feed(pim_term_t *term, const uint8_t *data, size_t length, uint8_t *reply, size_t reply_size) {
+size_t pim_iac_hello(const pim_iac_t *iac, uint8_t *out, size_t out_size) {
     size_t used = 0;
-    for (size_t i = 0; i < length; i++) {
-        uint8_t c = data[i];
-        switch (term->state) {
-        case S_IAC:
-            if (c == IAC) { put(term, '#'); term->state = S_TEXT; }
-            else if (c >= WILL && c <= DONT) { term->verb = c; term->state = S_VERB; }
-            else if (c == SB) term->state = S_SUB;
-            else term->state = S_TEXT;
-            break;
-        case S_VERB:
-            negotiate(term, term->verb, c, reply, reply_size, &used);
-            term->state = S_TEXT;
-            break;
-        case S_SUB:
-            if (c == IAC) term->state = S_SUB_IAC;
-            break;
-        case S_SUB_IAC:
-            term->state = c == SE ? S_TEXT : S_SUB;
-            break;
-        case S_ESC:
-            if (c == '[') { term->state = S_CSI; term->csi_value = 0; term->csi_has_value = false; }
-            else term->state = S_TEXT;
-            break;
-        case S_CSI:
-            if (c >= '0' && c <= '9') {
-                unsigned v = (unsigned)term->csi_value * 10U + (unsigned)(c - '0');
-                term->csi_value = v > 255 ? 255 : (uint8_t)v;
-                term->csi_has_value = true;
-            } else if (c >= 0x40 && c <= 0x7e) {
-                if (c == 'C') {
-                    unsigned n = term->csi_has_value ? term->csi_value : 1U;
-                    while (n-- > 0 && term->column < PIM_TERM_COLS) put(term, ' ');
-                } else if (c == 'J' && term->csi_has_value && term->csi_value == 2) {
-                    { bool echo = term->remote_echo; pim_term_init(term); term->remote_echo = echo; }
-                }
-                term->state = S_TEXT;
-            }
-            break;
-        default:
-            if (c == IAC) term->state = S_IAC;
-            else if (c == 0x1b) term->state = S_ESC;
-            else if (c == '\n') newline(term);
-            else if (c == '\r') term->column = 0;
-            else if (c == '\b') { if (term->column > 0) { term->column--; current(term)[term->column] = '\0'; } }
-            else if (c == '\t') { do put(term, ' '); while (term->column % 8 != 0 && term->column < PIM_TERM_COLS); }
-            else if (c >= 32 && c < 127) put(term, (char)c);
-            else if (c >= 128) put(term, '#');
-            break;
-        }
-    }
+    (void)iac;
+    /* Ask the host to stop waiting for a go-ahead, and offer what we can tell it
+       about ourselves. The window size itself waits for DO NAWS. */
+    command(out, out_size, &used, DO, OPT_SGA);
+    command(out, out_size, &used, WILL, OPT_SGA);
+    command(out, out_size, &used, WILL, OPT_TTYPE);
+    command(out, out_size, &used, WILL, OPT_NAWS);
     return used;
 }
 
-unsigned pim_term_max_scroll(const pim_term_t *term, unsigned rows) {
-    return term->count > rows ? term->count - rows : 0;
+static void send_naws(const pim_iac_t *iac, uint8_t *out, size_t size, size_t *used) {
+    if (*used + 9 > size) return;
+    out[(*used)++] = IAC; out[(*used)++] = SB; out[(*used)++] = OPT_NAWS;
+    out[(*used)++] = 0; out[(*used)++] = iac->cols;
+    out[(*used)++] = 0; out[(*used)++] = iac->rows;
+    out[(*used)++] = IAC; out[(*used)++] = SE;
 }
 
-void pim_term_view(const pim_term_t *term, unsigned rows, unsigned scroll, char *out, size_t out_size) {
-    unsigned max = pim_term_max_scroll(term, rows), last, start;
-    size_t used = 0;
-    if (out_size == 0) return;
-    if (scroll > max) scroll = max;
-    last = term->count - scroll;
-    start = last > rows ? last - rows : 0;
-    for (unsigned i = start; i < last; i++) {
-        const char *line = term->lines[(term->first + i) % PIM_TERM_LINES];
-        size_t length = strlen(line);
-        if (used + length + 2 > out_size) break;
-        memcpy(out + used, line, length);
-        used += length;
-        if (i + 1 < last) out[used++] = '\n';
+static void send_type(pim_iac_t *iac, uint8_t *out, size_t size, size_t *used) {
+    const char *name = terminal_types[iac->type_index < TYPE_COUNT ? iac->type_index : TYPE_COUNT - 1];
+    size_t length = strlen(name);
+    if (*used + length + 6 > size) return;
+    out[(*used)++] = IAC; out[(*used)++] = SB; out[(*used)++] = OPT_TTYPE;
+    out[(*used)++] = TTYPE_IS;
+    memcpy(out + *used, name, length);
+    *used += length;
+    out[(*used)++] = IAC; out[(*used)++] = SE;
+    /* Each further SEND walks the list and then sticks on the last entry. */
+    if (iac->type_index + 1u < TYPE_COUNT) iac->type_index++;
+}
+
+static void negotiate(pim_iac_t *iac, uint8_t verb, uint8_t option,
+                      uint8_t *reply, size_t size, size_t *used) {
+    switch (verb) {
+    case WILL:
+        if (option == OPT_ECHO) {
+            if (!iac->remote_echo) command(reply, size, used, DO, option);
+            iac->remote_echo = true;
+        } else if (option == OPT_SGA) {
+            if (!iac->sga_agreed) command(reply, size, used, DO, option);
+            iac->sga_agreed = true;
+        } else if (option == OPT_BINARY) {
+            if (!iac->binary_in) command(reply, size, used, DO, option);
+            iac->binary_in = true;
+        } else {
+            command(reply, size, used, DONT, option);
+        }
+        break;
+    case WONT:
+        if (option == OPT_ECHO && iac->remote_echo) {
+            iac->remote_echo = false;
+            command(reply, size, used, DONT, option);
+        } else if (option == OPT_BINARY && iac->binary_in) {
+            iac->binary_in = false;
+            command(reply, size, used, DONT, option);
+        } else if (option == OPT_SGA && iac->sga_agreed) {
+            iac->sga_agreed = false;
+            command(reply, size, used, DONT, option);
+        }
+        break;
+    case DO:
+        if (option == OPT_SGA) {
+            command(reply, size, used, WILL, option);
+        } else if (option == OPT_TTYPE) {
+            if (!iac->type_agreed) command(reply, size, used, WILL, option);
+            iac->type_agreed = true;
+        } else if (option == OPT_NAWS) {
+            if (!iac->naws_agreed) command(reply, size, used, WILL, option);
+            iac->naws_agreed = true;
+            send_naws(iac, reply, size, used);
+        } else if (option == OPT_BINARY) {
+            if (!iac->binary_out) command(reply, size, used, WILL, option);
+            iac->binary_out = true;
+        } else {
+            command(reply, size, used, WONT, option);
+        }
+        break;
+    case DONT:
+        /* Only answer options we had actually taken on, so this cannot loop. */
+        if (option == OPT_NAWS && iac->naws_agreed) {
+            iac->naws_agreed = false;
+            command(reply, size, used, WONT, option);
+        } else if (option == OPT_TTYPE && iac->type_agreed) {
+            iac->type_agreed = false;
+            command(reply, size, used, WONT, option);
+        } else if (option == OPT_BINARY && iac->binary_out) {
+            iac->binary_out = false;
+            command(reply, size, used, WONT, option);
+        }
+        break;
+    default: break;
     }
-    out[used] = '\0';
 }
 
-size_t pim_term_encode(uint8_t key, uint8_t out[2]) {
-    if (key == '\n' || key == '\r') { out[0] = '\r'; out[1] = '\n'; return 2; }
-    if (key == 0xff) { out[0] = 0xff; out[1] = 0xff; return 2; }
-    out[0] = key;
-    return 1;
+static void subnegotiation(pim_iac_t *iac, uint8_t *reply, size_t size, size_t *used) {
+    if (iac->sub_length < 1) return;
+    if (iac->sub[0] == OPT_TTYPE && iac->sub_length >= 2 && iac->sub[1] == TTYPE_SEND) {
+        send_type(iac, reply, size, used);
+    }
+    /* Anything else (NAWS echoes, charset, speed) needs no answer from us. */
+}
+
+size_t pim_iac_feed(pim_iac_t *iac, const uint8_t *in, size_t length,
+                    uint8_t *data, size_t data_size,
+                    uint8_t *reply, size_t reply_size, size_t *reply_used) {
+    size_t out = 0, used = 0, i;
+    for (i = 0; i < length; i++) {
+        uint8_t c = in[i];
+        switch (iac->state) {
+        case S_IAC:
+            if (c == IAC) { put_byte(data, data_size, &out, IAC); iac->state = S_DATA; }
+            else if (c >= WILL && c <= DONT) { iac->verb = c; iac->state = S_VERB; }
+            else if (c == SB) { iac->state = S_SUB; iac->sub_length = 0; }
+            else iac->state = S_DATA;      /* NOP, GA, AYT and the rest: nothing to do */
+            break;
+        case S_VERB:
+            negotiate(iac, iac->verb, c, reply, reply_size, &used);
+            iac->state = S_DATA;
+            break;
+        case S_SUB:
+            if (c == IAC) iac->state = S_SUB_IAC;
+            else if (iac->sub_length < PIM_IAC_SUB_MAX) iac->sub[iac->sub_length++] = c;
+            break;
+        case S_SUB_IAC:
+            if (c == SE) {
+                subnegotiation(iac, reply, reply_size, &used);
+                iac->state = S_DATA;
+            } else if (c == IAC) {
+                /* a doubled 0xff inside a subnegotiation is one data byte */
+                if (iac->sub_length < PIM_IAC_SUB_MAX) iac->sub[iac->sub_length++] = IAC;
+                iac->state = S_SUB;
+            } else {
+                iac->state = S_SUB;
+            }
+            break;
+        default:
+            if (c == IAC) iac->state = S_IAC;
+            else put_byte(data, data_size, &out, c);
+            break;
+        }
+    }
+    if (reply_used != NULL) *reply_used = used;
+    return out;
+}
+
+size_t pim_iac_encode(const pim_iac_t *iac, const uint8_t *in, size_t length,
+                      uint8_t *out, size_t out_size) {
+    size_t used = 0, i;
+    for (i = 0; i < length; i++) {
+        uint8_t c = in[i];
+        bool twice = c == IAC || (c == '\r' && !iac->binary_out && (i + 1 >= length || in[i + 1] != '\n'));
+        if (used + (twice ? 2u : 1u) > out_size) return used;
+        out[used++] = c;
+        if (c == IAC) out[used++] = IAC;
+        else if (twice) out[used++] = '\n';
+    }
+    return used;
 }

@@ -1,2 +1,11 @@
 # Auto detect text files and perform LF normalization
 * text=auto
+
+# Vendored upstream sources are kept exactly as upstream published them, line
+# endings included, so that a diff against upstream shows only the changes this
+# project made deliberately - and so the "byte for byte" in each PROVENANCE.md
+# stays true. Without this, the rule above would normalise their CRLF to LF and
+# every line of several thousand would read as modified.
+third_party/microlink/** -text
+third_party/cJSON/** -text
+third_party/tweetnacl/** -text

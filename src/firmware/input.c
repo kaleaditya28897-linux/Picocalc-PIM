@@ -9,6 +9,7 @@
 #define OFF_AFTER_MS 120000U
 
 static volatile bool game_mode;
+static volatile bool terminal_mode;
 static uint8_t backlight_level = 0xff;
 static uint8_t backlight_now = 0xff;
 static uint32_t last_activity_ms;
@@ -41,8 +42,17 @@ void pim_input_idle_poll(void) {
 }
 
 void pim_input_set_game_mode(bool enabled) { game_mode = enabled; }
+void pim_input_set_terminal_mode(bool enabled) { terminal_mode = enabled; }
 
 static uint32_t map_key(int key) {
+    /* A terminal wants every key, including the ones LVGL has no name for and
+       the control codes the driver folds Ctrl into. Printable text still comes
+       through as itself so the widgets below behave normally. */
+    if (terminal_mode) {
+        if (key >= 0x20 && key <= 0x7e) return (uint32_t)key;
+        if (key == 0xb1) return LV_KEY_ESC;   /* Esc always leaves the session */
+        return PIM_UI_TERM_KEY | (uint32_t)key;
+    }
     switch (key) {
         case 0xb5: return LV_KEY_UP;
         case 0xb6: return LV_KEY_DOWN;

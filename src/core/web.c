@@ -145,13 +145,36 @@ static void format_date(char *out, size_t size, pim_date_t date) {
 
 static bool name_ok(const char *name) {
     size_t length = strlen(name);
-    static const char *const reserved[] = {"pim.dat", "wifi.cfg", "theme.cfg", "today.cfg", "sound.cfg", "recurring.cfg"};
+    static const char *const reserved[] = {"pim.dat", "wifi.cfg", "theme.cfg", "today.cfg", "sound.cfg", "recurring.cfg", "hosts.cfg", "lock.cfg"};
     if (length == 0 || length > 47 || strcmp(name, ".") == 0 || strcmp(name, "..") == 0) return false;
     for (size_t i = 0; i < length; i++)
         if (!isalnum((unsigned char)name[i]) && name[i] != '.' && name[i] != '_' && name[i] != '-') return false;
     for (size_t i = 0; i < sizeof(reserved) / sizeof(reserved[0]); i++)
         if (strcmp(name, reserved[i]) == 0) return false;
     return true;
+}
+
+/* Private keys never leave the card: the server speaks plain HTTP behind a
+   four-digit PIN, so it will accept a key but not hand one back. Their public
+   halves are a different matter - they exist to be copied onto servers - so a
+   ".pub" file is served and everything else under ssh/ is not. */
+static bool private_path(const char *path) {
+    size_t length = strlen(path);
+    /* The Tailscale identity - machine key, WireGuard key, DISCO key - has no
+       half that is meant to be read back, so none of it is served at all. */
+    if (strcmp(path, "ts") == 0 || strncmp(path, "ts/", 3) == 0) return true;
+    if (strcmp(path, "tailscale.cfg") == 0) return true;   /* holds an auth key */
+    if (strcmp(path, "ssh") == 0) return true;          /* the folder itself stays unlisted */
+    if (strncmp(path, "ssh/", 4) != 0) return false;
+    return !(length > 4 && strcmp(path + length - 4, ".pub") == 0);
+}
+
+/* The whole folder is kept out of the manifest, public halves included, so a
+   sync never pulls key material around by accident. */
+static bool key_folder_path(const char *path) {
+    return strncmp(path, "ssh/", 4) == 0 || strcmp(path, "ssh") == 0 ||
+           strncmp(path, "ts/", 3) == 0 || strcmp(path, "ts") == 0 ||
+           strcmp(path, "tailscale.cfg") == 0;
 }
 
 /* Slash-separated relative path (at most 3 levels); every segment must be a valid name. */
@@ -400,7 +423,11 @@ static void page_journal(pim_web_t *web, page_t *page, pim_web_response_t *respo
     finish_page(page, response);
 }
 
-static char journal_text[PIM_WEB_EDIT_MAX + 1];
+/* The server handles one request at a time - one client, one pcb - so the
+   handlers that need room to decode a form field or hold a file share this
+   rather than each keeping its own. That is 20 KB of RAM back. */
+static char scratch[PIM_WEB_BODY_MAX + 1];
+#define journal_text scratch
 
 static void page_journal_edit(pim_web_t *web, page_t *page, pim_web_response_t *response, const char *query, char *out, size_t out_size) {
     char text[24], path[160];
@@ -463,7 +490,7 @@ static void page_files(pim_web_t *web, page_t *page, pim_web_response_t *respons
     struct dirent *entry;
     char dir[150], folder[200], prefix[160];
     param_get(query, "dir", dir, sizeof(dir));
-    if (dir[0] != '\0' && !path_ok(dir)) dir[0] = '\0';
+    if (dir[0] != '\0' && (!path_ok(dir) || private_path(dir))) dir[0] = '\0';
     if (dir[0] != '\0') join_path(folder, sizeof(folder), web->root, dir);
     else snprintf(folder, sizeof(folder), "%s", web->root);
     snprintf(prefix, sizeof(prefix), "%s%s", dir, dir[0] != '\0' ? "/" : "");
@@ -484,6 +511,12 @@ static void page_files(pim_web_t *web, page_t *page, pim_web_response_t *respons
         join_path(path, sizeof(path), folder, entry->d_name);
         if (stat(path, &info) != 0) continue;
         if (S_ISDIR(info.st_mode)) {
+            /* At the root the folder's own name decides; deeper down the prefix
+               already does, and browsing into it is refused above anyway. */
+            if (prefix[0] == '\0' ? key_folder_path(entry->d_name) : key_folder_path(prefix)) {
+                putf(page, "<li>[dir] %s (keys: not served over HTTP)</li>", entry->d_name);
+                continue;
+            }
             putf(page, "<li>[dir] <a href='/files?dir=%s%s'>%s</a></li>", prefix, entry->d_name, entry->d_name);
             continue;
         }
@@ -509,6 +542,7 @@ static void manifest_walk(const char *root, size_t prefix_length, unsigned depth
         struct stat info;
         if (!name_ok(entry->d_name) || base + strlen(entry->d_name) + 2 >= sizeof(manifest_path)) continue;
         snprintf(manifest_path + base, sizeof(manifest_path) - base, "/%.47s", entry->d_name);
+        if (key_folder_path(manifest_path + prefix_length + 1)) { manifest_path[base] = '\0'; continue; }
         if (stat(manifest_path, &info) == 0) {
             if (S_ISDIR(info.st_mode) && depth < 3) manifest_walk(root, prefix_length, depth + 1, page);
             else if (S_ISREG(info.st_mode) && depth > 0) putf(page, "%s %lu\n", manifest_path + prefix_length + 1, (unsigned long)info.st_size);
@@ -539,11 +573,17 @@ static size_t read_file(const char *path, char *buffer, size_t size, bool *too_b
 
 static void page_edit(pim_web_t *web, page_t *page, pim_web_response_t *response, const char *query, char *out, size_t out_size) {
     char name[150], path[200];
-    static char text[PIM_WEB_EDIT_MAX + 1];
+        char *text = scratch;
     size_t length;
     bool too_big;
     param_get(query, "name", name, sizeof(name));
     if (!path_ok(name)) { fail(response, out, out_size, 400, "Invalid file name"); return; }
+    if (private_path(name)) {
+        fail(response, out, out_size, 403,
+             "SSH keys are not served. Put one on the card, or send it with "
+             "curl --data-binary @key .../upload/ssh/<name>");
+        return;
+    }
     join_path(path, sizeof(path), web->root, name);
     length = read_file(path, text, PIM_WEB_EDIT_MAX, &too_big);
     if (too_big) { fail(response, out, out_size, 413, "File is too large to edit in the browser; download it instead"); return; }
@@ -583,11 +623,11 @@ static void page_import(page_t *page, pim_web_response_t *response) {
 }
 
 static void do_import(pim_web_t *web, const char *body, size_t body_length, pim_web_response_t *response, char *out, size_t out_size) {
-    static char text[PIM_WEB_BODY_MAX + 1];
+    char *text = scratch;
     pim_ics_result_t result;
     page_t page = {out, out_size, 0, false};
-    if (strncmp(body, "ics=", 4) == 0) param_get(body, "ics", text, sizeof(text));
-    else copy_text(text, sizeof(text), body);
+    if (strncmp(body, "ics=", 4) == 0) param_get(body, "ics", text, PIM_WEB_BODY_MAX);
+    else copy_text(text, PIM_WEB_BODY_MAX, body);
     (void)body_length;
     result = pim_ics_import(web->database, text);
     if (result.events + result.todos > 0) commit(web);
@@ -666,9 +706,9 @@ void pim_web_handle(pim_web_t *web, const char *method, const char *target, cons
     else if (get && strcmp(path, "/edit") == 0) page_edit(web, &page, response, query, out, out_size);
     else if (post && strcmp(path, "/save") == 0) {
         char name[150];
-        static char text[PIM_WEB_BODY_MAX + 1];
+        char *text = scratch;
         param_get(body, "name", name, sizeof(name));
-        param_get(body, "text", text, sizeof(text));
+        param_get(body, "text", text, PIM_WEB_BODY_MAX);
         if (!path_ok(name)) fail(response, out, out_size, 400, "Invalid file name");
         else if (strlen(text) > PIM_WEB_EDIT_MAX) fail(response, out, out_size, 413, "Text is limited to 4096 bytes");
         else if (!write_file(web, name, text, strlen(text))) fail(response, out, out_size, 500, "Could not write the file");
@@ -686,6 +726,7 @@ void pim_web_handle(pim_web_t *web, const char *method, const char *target, cons
         bool too_big;
         size_t length;
         if (!path_ok(path + 6)) { fail(response, out, out_size, 400, "Invalid file name"); return; }
+        if (private_path(path + 6)) { fail(response, out, out_size, 403, "Keys are not served"); return; }
         join_path(file_path, sizeof(file_path), web->root, path + 6);
         length = read_file(file_path, out, out_size - 1, &too_big);
         if (too_big) { fail(response, out, out_size, 413, "File is too large to download here"); return; }

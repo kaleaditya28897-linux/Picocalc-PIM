@@ -19,3 +19,17 @@ Thumbs.db
 # Backup files
 *.bak
 *.backup
+
+# Private data: host aliases, SSH keys, anything generated from ~/.ssh.
+# The importer writes outside the repository by default and refuses to write
+# inside a git work tree; these are a second line of defence.
+hosts.cfg
+ssh/
+# holds a Tailscale auth key, which is a secret
+tailscale.cfg
+ts/
+id_*
+*.pub
+!assets/**/*.pub
+private/
+pim_sim_root/

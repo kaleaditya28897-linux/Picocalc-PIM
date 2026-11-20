@@ -29,6 +29,12 @@ const char *pim_wifi_pin(void);
 const char *pim_wifi_address(void);
 /* Disconnects and powers the radio off; also done automatically after 15 idle minutes. */
 void pim_wifi_off(void);
+/* The web server, separately from the radio. Its request and response buffers
+   are 29 KB, which on a 520 KB device is worth having back when something else
+   needs a large run of memory - the Tailscale client, parsing a network map.
+   Stopping it leaves the Wi-Fi connection and the terminal alone. */
+void pim_wifi_web_stop(void);
+bool pim_wifi_web_start(void);
 void pim_wifi_poll(void);
 
 /* Telnet transport: raw bytes in and out; protocol and terminal handling live in the core. */
